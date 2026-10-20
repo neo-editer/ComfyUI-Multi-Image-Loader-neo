@@ -372,8 +372,8 @@ class MultiImageLoader:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "IMAGE", "IMAGE", "STRING", "INT", "INT",)
-    RETURN_NAMES = ("image_batch", "mask_batch", "image_original", "grid_image", "grid_hires", "aspect_ratio_out", "columns_n", "rows_n",)
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "STRING", "INT", "INT",)
+    RETURN_NAMES = ("image_batch", "mask_batch", "image_original", "grid_image", "grid_hires", "native_images", "aspect_ratio_out", "columns_n", "rows_n",)
     FUNCTION = "load_images"
     CATEGORY = "image/loaders"
     OUTPUT_NODE = False
@@ -422,12 +422,13 @@ class MultiImageLoader:
         placeholder_img = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
         placeholder_mask = torch.ones((1, 64, 64), dtype=torch.float32)
         if not filtered_filenames and images is None:
-            return (placeholder_img, placeholder_mask, placeholder_img, placeholder_img, placeholder_img, resolved_ar, grid_columns, grid_rows)
+            return (placeholder_img, placeholder_mask, placeholder_img, placeholder_img, placeholder_img, [placeholder_img], resolved_ar, grid_columns, grid_rows)
 
         input_dir = Path(folder_paths.get_input_directory())
         tensors = []
         mask_tensors = []
         orig_tensors = []
+        native_image_list = []
         orig_ref_w = orig_ref_h = None
 
         master_canvas = None
@@ -566,6 +567,7 @@ class MultiImageLoader:
                 img_orig = Image.new("RGB", (orig_ref_w, orig_ref_h), _bg_rgb)
                 orig_arr = np.array(img_orig).astype(np.float32) / 255.0
                 orig_tensors.append(torch.from_numpy(orig_arr).unsqueeze(0))
+                native_image_list.append(torch.from_numpy(orig_arr).unsqueeze(0))
                 img_scaled = Image.new("RGB", (ref_w, ref_h), _bg_rgb)
                 arr = np.array(img_scaled).astype(np.float32) / 255.0
                 tensors.append(torch.from_numpy(arr).unsqueeze(0))
@@ -585,6 +587,16 @@ class MultiImageLoader:
                     img = img.convert("RGB")
 
                 img_orig = img.copy()
+                if img_orig.mode == "RGBA":
+                    img_orig_rgb = Image.new("RGB", img_orig.size, _parse_bg_color_word(bg_color))
+                    img_orig_rgb.paste(img_orig, (0, 0), mask=img_orig.split()[3])
+                    img_orig = img_orig_rgb
+                else:
+                    img_orig = img_orig.convert("RGB")
+
+                native_arr = np.array(img_orig).astype(np.float32) / 255.0
+                native_image_list.append(torch.from_numpy(native_arr).unsqueeze(0))
+
                 t_orig = transforms.get(fname)
                 effective_fit_mode = "letterbox" if individual_ratio_mode else fit_mode
                 if t_orig:
@@ -651,14 +663,14 @@ class MultiImageLoader:
                 resolved_ar = "auto"
 
         if not tensors:
-            return (placeholder_img, placeholder_mask, placeholder_img, placeholder_img, placeholder_img, resolved_ar, grid_columns, grid_rows)
+            return (placeholder_img, placeholder_mask, placeholder_img, placeholder_img, placeholder_img, [placeholder_img], resolved_ar, grid_columns, grid_rows)
 
         batch = torch.cat(tensors, dim=0)
         mask_batch = torch.cat(mask_tensors, dim=0)
         orig_batch = torch.cat(orig_tensors, dim=0) if orig_tensors else placeholder_img
         grid_image = self._make_grid(batch, grid_rows, grid_columns, randomize, image_list, selected_items)
         grid_hires = self._make_grid(orig_batch, grid_rows, grid_columns, randomize, image_list, selected_items)
-        return (batch, mask_batch, orig_batch, grid_image, grid_hires, resolved_ar, grid_columns, grid_rows)
+        return (batch, mask_batch, orig_batch, grid_image, grid_hires, native_image_list, resolved_ar, grid_columns, grid_rows)
 
     def _make_grid(self, batch, rows, cols, randomize="None", image_list="[]", selected_items="[]"):
         B, H, W, C = batch.shape
