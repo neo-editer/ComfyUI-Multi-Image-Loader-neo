@@ -140,7 +140,7 @@ async def inpaint_handler(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
-# ─── Live-preview route ────────────────────────────────────────────────────────
+# ─── Live-preview route ───────────────────────────────────────────────────────
 
 @PromptServer.instance.routes.post("/multi_image_loader/preview")
 async def preview_transform_handler(request):
@@ -200,7 +200,7 @@ async def preview_transform_handler(request):
         return web.Response(status=500, text=str(e))
 
 
-# ─── Rembg route ──────────────────────────────────────────────────────────────
+# ─── Rembg route ─────────────────────────────────────────────────────────────
 
 @PromptServer.instance.routes.post("/multi_image_loader/rembg")
 async def rembg_handler(request):
@@ -314,7 +314,7 @@ async def rembg_handler(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
-# ─── Rembg Reset route ────────────────────────────────────────────────────────
+# ─── Rembg Reset route ───────────────────────────────────────────────────────
 
 @PromptServer.instance.routes.post("/multi_image_loader/rembg_reset")
 async def rembg_reset_handler(request):
@@ -436,7 +436,7 @@ async def upload_edit_handler(request):
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
-# ─── Node ─────────────────────────────────────────────────────────────────────
+# ─── Node ────────────────────────────────────────────────────────────────
 
 def _scale_to_megapixels(img: Image.Image, megapixels: float) -> Image.Image:
     """Scale `img` down if it exceeds `megapixels` * 1 000 000 total pixels.
@@ -472,6 +472,39 @@ def _compute_canvas_dims(aspect_ratio: str, megapixels: float, first_img_size=No
     w = max(1, round(math.sqrt(total_px * aw / ah)))
     h = max(1, round(math.sqrt(total_px * ah / aw)))
     return (w, h)
+
+
+def _compute_individual_ratio_bounds(filtered_filenames, input_dir, megapixels=1, images=None):
+    """Compute a uniform batch canvas size while preserving each image's own aspect ratio.
+    This mode is opt-in and only alters the new 'Individual Ratios' option.
+    """
+    scaled_sizes = []
+    orig_sizes = []
+
+    if images is not None:
+        scaled_sizes.append((max(1, int(images.shape[2])), max(1, int(images.shape[1]))))
+        orig_sizes.append((max(1, int(images.shape[2])), max(1, int(images.shape[1]))))
+
+    for fname in filtered_filenames:
+        fpath = input_dir / fname
+        if not fpath.exists():
+            continue
+        try:
+            img = Image.open(fpath)
+            img = ImageOps.exif_transpose(img)
+            orig_sizes.append(img.size)
+            scaled_sizes.append(_scale_to_megapixels(img, megapixels).size)
+        except Exception:
+            continue
+
+    if not scaled_sizes:
+        return 512, 512, 512, 512
+
+    ref_w = max(w for w, _ in scaled_sizes)
+    ref_h = max(h for _, h in scaled_sizes)
+    orig_ref_w = max(w for w, _ in orig_sizes) if orig_sizes else ref_w
+    orig_ref_h = max(h for _, h in orig_sizes) if orig_sizes else ref_h
+    return ref_w, ref_h, orig_ref_w, orig_ref_h
 
 
 def _parse_hex_color(hex_str: str) -> tuple:
@@ -551,7 +584,6 @@ def _fit_image(img: Image.Image, target_w: int, target_h: int, mode: str, bg_col
     return canvas
 
 
-
 def _apply_crop_region(img: Image.Image, transform: dict) -> Image.Image:
     """Apply a crop region sub-selection to the SOURCE image.
     cx/cy/cw/ch are fractions of the source image dimensions.
@@ -579,7 +611,7 @@ def _apply_crop_transform(img: Image.Image, transform: dict, canvas_w: int, canv
       flipH, flipV – mirror flags
       rotate    – clockwise degrees (-180..180)
       bg        – background fill: 'black' | 'white' | '#rrggbb' | '#808080' (default) |
-                  'telea' | 'navier-stokes'
+                   'telea' | 'navier-stokes'
     fit_mode      – 'letterbox' | 'crop'  controls base scale when scale==1.0
     node_bg_color – RGB tuple for letterbox padding (from the node's bg_color widget)
     """
@@ -654,12 +686,12 @@ def _apply_crop_transform(img: Image.Image, transform: dict, canvas_w: int, canv
     else:
         bg_color = (128, 128, 128)
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════
     # INPAINT PATH — all transforms in RGBA so the final alpha = coverage mask.
     # Inpainting runs once at the end on the full canvas, catching BOTH:
     #   • rotation corner gaps
     #   • pan / zoom letterbox borders
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════
     if inpaint_method:
         try:
             import cv2
@@ -754,9 +786,9 @@ def _apply_crop_transform(img: Image.Image, transform: dict, canvas_w: int, canv
 
         return final_img
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════
     # SOLID-FILL PATH — flip → rotate → scale → pan → paste onto bg canvas
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════
     if flipH: img = ImageOps.mirror(img)
     if flipV: img = ImageOps.flip(img)
 
@@ -972,7 +1004,6 @@ def _generate_mask_from_maskops(transform: dict, ref_w: int, ref_h: int) -> Imag
     return mask
 
 
-
 class MultiImageLoader:
     """
     Loads multiple images uploaded directly in the UI (no folder needed).
@@ -999,9 +1030,9 @@ class MultiImageLoader:
                 "image_list":   ("STRING", {"default": "[]"}),
                 "fit_mode":     (["letterbox", "crop"],),
                 "bg_color":     (["gray", "black", "white", "red"],
-                                 {"default": "gray"}),
-                "aspect_ratio": (["Starred image", "Image Input", "Aspect Ratio Input", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"],
-                                 {"default": "Starred image"}),
+                                  {"default": "gray"}),
+                "aspect_ratio": (["Starred image", "Image Input", "Aspect Ratio Input", "Individual Ratios", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"],
+                                  {"default": "Starred image"}),
                 "megapixels":   ("INT", {"default": 1, "min": 0, "max": 32, "step": 1, "display": "number"}),
 
                 "thumb_size":   (["full", "large", "medium", "small"], {"default": "medium"}), # KEEP FOR BACKWARDS COMPATIBILITY
@@ -1023,6 +1054,7 @@ class MultiImageLoader:
 
     @classmethod
     def IS_CHANGED(cls, images=None, aspect_ratio_in=None, image_list="[]", fit_mode="letterbox", bg_color="gray", aspect_ratio="Starred image", megapixels=1, thumb_size="medium", double_click="Edit Image", crop_data="{}", selected_items="[]", reference_image="", grid_columns=3, grid_rows=3, randomize="None"):
+        # Keep randomization mode stable as a UI signal; if randomization is active, re-run to refresh shuffle.
         if randomize != "None":
             return float("NaN")
         # Include images shape in the hash so re-execution triggers when it changes
@@ -1094,6 +1126,8 @@ class MultiImageLoader:
         first_valid_img = None
         badge_resolved = False
 
+        individual_ratio_mode = (aspect_ratio == "Individual Ratios")
+
         # Step 1: Try reference_image (badge) first
         if reference_image:
             fpath = input_dir / reference_image
@@ -1133,6 +1167,10 @@ class MultiImageLoader:
                 orig_ref_w, orig_ref_h = m_w, m_h
                 fixed_canvas = True
                 print(f"[MultiImageLoader] Image Input mode: using exact tensor dims {m_w}x{m_h}")
+            elif individual_ratio_mode:
+                ref_w, ref_h, orig_ref_w, orig_ref_h = _compute_individual_ratio_bounds(filtered_filenames, input_dir, megapixels, images)
+                fixed_canvas = True
+                print(f"[MultiImageLoader] Individual Ratios mode: using shared batch max {ref_w}x{ref_h}")
             else:
                 if megapixels <= 0:
                     # No compression: use native tensor dimensions
@@ -1148,7 +1186,7 @@ class MultiImageLoader:
                 print(f"[MultiImageLoader] images input: {m_w}x{m_h} -> canvas {c_w}x{c_h} ({c_w*c_h/1e6:.2f} MP)")
 
         # Step 3: If no badge and no upstream, try aspect_ratio
-        elif not badge_resolved and aspect_ratio not in ("Starred image", "Image Input", "none") and bool(aspect_ratio):
+        elif not badge_resolved and aspect_ratio not in ("Starred image", "Image Input", "Individual Ratios", "none") and bool(aspect_ratio):
             fixed_canvas = True
             dims = _compute_canvas_dims(aspect_ratio, megapixels)
             if dims is not None:
@@ -1158,6 +1196,10 @@ class MultiImageLoader:
                 # megapixels=0 with fixed AR but no image yet — defer to Step 4
                 ref_w = ref_h = None
                 fixed_canvas = True
+        elif not badge_resolved and aspect_ratio == "Individual Ratios":
+            fixed_canvas = True
+            ref_w, ref_h, orig_ref_w, orig_ref_h = _compute_individual_ratio_bounds(filtered_filenames, input_dir, megapixels, images)
+            print(f"[MultiImageLoader] Individual Ratios mode: using shared batch max {ref_w}x{ref_h}")
         elif not badge_resolved:
             fixed_canvas = False
             ref_w = ref_h = None
@@ -1201,7 +1243,7 @@ class MultiImageLoader:
                         orig_ref_h = first_native_h
 
             if ref_w is None:
-                if aspect_ratio not in ("Starred image", "Image Input", "none") and bool(aspect_ratio):
+                if aspect_ratio not in ("Starred image", "Image Input", "Individual Ratios", "none") and bool(aspect_ratio):
                     dims = _compute_canvas_dims(aspect_ratio, megapixels, (first_native_w, first_native_h))
                     if dims is not None:
                         ref_w, ref_h = dims
@@ -1227,6 +1269,10 @@ class MultiImageLoader:
                 tmp_scaled = _scale_to_megapixels(Image.new("RGB", (512, 512)), megapixels)
                 ref_w, ref_h = tmp_scaled.size
 
+        if individual_ratio_mode:
+            ref_w, ref_h, orig_ref_w, orig_ref_h = _compute_individual_ratio_bounds(filtered_filenames, input_dir, megapixels, images)
+            print(f"[MultiImageLoader] Individual Ratios override: batch canvas {ref_w}x{ref_h}, native canvas {orig_ref_w}x{orig_ref_h}")
+
         for fname in filtered_filenames:
             if fname.startswith("__BLANK__"):
                 _bg_rgb = _parse_bg_color_word(bg_color)
@@ -1244,7 +1290,7 @@ class MultiImageLoader:
 
             fpath = input_dir / fname
             if not fpath.exists():
-                print(f"[MultiImageLoader] Warning: file not found \u2013 {fpath}")
+                print(f"[MultiImageLoader] Warning: file not found – {fpath}")
                 continue
             try:
                 img = Image.open(fpath)
@@ -1259,10 +1305,11 @@ class MultiImageLoader:
                 # ── Original-resolution branch (no megapixel budget) ──
                 img_orig = img.copy()
                 t_orig = transforms.get(fname)
+                effective_fit_mode = "letterbox" if individual_ratio_mode else fit_mode
                 if t_orig:
-                    img_orig = _apply_crop_transform(img_orig, t_orig, orig_ref_w, orig_ref_h, fit_mode=fit_mode, node_bg_color=_parse_bg_color_word(bg_color), global_scale=1.0)
+                    img_orig = _apply_crop_transform(img_orig, t_orig, orig_ref_w, orig_ref_h, fit_mode=effective_fit_mode, node_bg_color=_parse_bg_color_word(bg_color), global_scale=1.0)
                 elif img_orig.size != (orig_ref_w, orig_ref_h):
-                    img_orig = _fit_image(img_orig, orig_ref_w, orig_ref_h, fit_mode, bg_color=_parse_bg_color_word(bg_color), global_scale=1.0)
+                    img_orig = _fit_image(img_orig, orig_ref_w, orig_ref_h, effective_fit_mode, bg_color=_parse_bg_color_word(bg_color), global_scale=1.0)
 
                 # Composite over background if still RGBA, otherwise convert to RGB
                 if img_orig.mode == "RGBA":
@@ -1284,9 +1331,9 @@ class MultiImageLoader:
                 _bg_rgb = _parse_bg_color_word(bg_color)
 
                 if t:
-                    img = _apply_crop_transform(img, t, ref_w, ref_h, fit_mode=fit_mode, node_bg_color=_bg_rgb, global_scale=1.0)
+                    img = _apply_crop_transform(img, t, ref_w, ref_h, fit_mode=effective_fit_mode, node_bg_color=_bg_rgb, global_scale=1.0)
                 elif img.size != (ref_w, ref_h):
-                    img = _fit_image(img, ref_w, ref_h, fit_mode, bg_color=_bg_rgb, global_scale=1.0)
+                    img = _fit_image(img, ref_w, ref_h, effective_fit_mode, bg_color=_bg_rgb, global_scale=1.0)
 
                 # Composite over background if still RGBA, otherwise convert to RGB
                 if img.mode == "RGBA":
@@ -1317,8 +1364,10 @@ class MultiImageLoader:
                 continue
 
         # Update resolved_ar based on the actual computed canvas size if it is a dynamic setting
-        if aspect_ratio in ("Starred image", "Image Input", "Aspect Ratio Input", "none") or not aspect_ratio:
-            if ref_w and ref_h:
+        if aspect_ratio in ("Starred image", "Image Input", "Aspect Ratio Input", "Individual Ratios", "none") or not aspect_ratio:
+            if individual_ratio_mode:
+                resolved_ar = "Individual Ratios"
+            elif ref_w and ref_h:
                 def _find_closest_ratio(w, h):
                     actual_ratio = w / h
                     common_ratios = [
@@ -1588,7 +1637,7 @@ class ScaleControl:
         return canvas
 
 
-# ─── Registrations ────────────────────────────────────────────────────────────
+# ─── Registrations ────────────────────────────────────────────────────────
 
 NODE_CLASS_MAPPINGS = {
     "MultiImageLoader": MultiImageLoader,
