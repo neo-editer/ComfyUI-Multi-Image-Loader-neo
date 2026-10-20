@@ -344,7 +344,7 @@ def _generate_mask_from_maskops(transform: dict, ref_w: int, ref_h: int) -> Imag
     return mask
 
 
-class MultiImageLoader:
+class NeoMultiImageLoader:
     """Loads multiple images into a single batch tensor while preserving available aspect-ratio modes."""
 
     UPLOADED_FILES_KEY = "image_list"
@@ -735,10 +735,10 @@ class MultiImageLoader:
         return grid
 
 
-class LoadImagesInGrid(MultiImageLoader):
+class NeoLoadImagesInGrid(NeoMultiImageLoader):
     @classmethod
     def INPUT_TYPES(cls):
-        return MultiImageLoader.INPUT_TYPES()
+        return NeoMultiImageLoader.INPUT_TYPES()
 
     RETURN_TYPES = ("IMAGE", "IMAGE",)
     RETURN_NAMES = ("grid_image", "grid_hires",)
@@ -747,12 +747,12 @@ class LoadImagesInGrid(MultiImageLoader):
 
     @classmethod
     def IS_CHANGED(cls, *args, **kwargs):
-        return MultiImageLoader.IS_CHANGED(*args, **kwargs)
+        return NeoMultiImageLoader.IS_CHANGED(*args, **kwargs)
 
     def compose_grid(self, *args, **kwargs):
         res = self.load_images(*args, **kwargs)
         return (res[3], res[4])
 
 
-NODE_CLASS_MAPPINGS = {"MultiImageLoader": MultiImageLoader, "LoadImagesInGrid": LoadImagesInGrid}
-NODE_DISPLAY_NAME_MAPPINGS = {"MultiImageLoader": "Load Multiple Images 🖼️", "LoadImagesInGrid": "Load Images in Grid (Deprecated) 🖼️"}
+NODE_CLASS_MAPPINGS = {"NeoMultiImageLoader": NeoMultiImageLoader, "NeoLoadImagesInGrid": NeoLoadImagesInGrid}
+NODE_DISPLAY_NAME_MAPPINGS = {"NeoMultiImageLoader": "neo Load Multiple Images 🖼️", "NeoLoadImagesInGrid": "neo Load Images in Grid (Deprecated) 🖼️"}
