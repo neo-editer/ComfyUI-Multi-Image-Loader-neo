@@ -3,12 +3,14 @@ from .batch_to_grid import FromBatchToGrid
 
 NODE_CLASS_MAPPINGS = {
     **MULTI_IMAGE_MAPPINGS,
-    "FromBatchToGrid": FromBatchToGrid
+    "NeoFromBatchToGrid": FromBatchToGrid,
+    "FromBatchToGrid": FromBatchToGrid,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     **MULTI_IMAGE_DISPLAY,
-    "FromBatchToGrid": "From Batch to Grid"
+    "NeoFromBatchToGrid": "neo - From Batch to Grid",
+    "FromBatchToGrid": "From Batch to Grid",
 }
 
 WEB_DIRECTORY = "./web"

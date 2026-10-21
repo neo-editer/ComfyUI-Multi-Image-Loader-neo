@@ -1605,12 +1605,18 @@ class ScaleControl:
 # ─── Registrations ────────────────────────────────────────────────────────────
 
 NODE_CLASS_MAPPINGS = {
+    "NeoMultiImageLoader": MultiImageLoader,
+    "NeoLoadImagesInGrid": LoadImagesInGrid,
+    "NeoScaleControl": ScaleControl,
     "MultiImageLoader": MultiImageLoader,
     "LoadImagesInGrid": LoadImagesInGrid,
     "ScaleControl": ScaleControl,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "NeoMultiImageLoader": "neo - Load Multiple Images 🖼️",
+    "NeoLoadImagesInGrid": "neo - Load Images in Grid (Deprecated) 🖼️",
+    "NeoScaleControl": "neo - Scale Control 🔍",
     "MultiImageLoader": "Load Multiple Images 🖼️",
     "LoadImagesInGrid": "Load Images in Grid (Deprecated) 🖼️",
     "ScaleControl": "Scale Control 🔍",
