@@ -87,8 +87,8 @@ import { api } from "../../scripts/api.js";
 
 // ─── constants ───────────────────────────────────────────────────────────────
 
-const NODE_TYPE  = "MultiImageLoader";
-const NODE_TYPES = ["MultiImageLoader", "NeoMultiImageLoader"];
+const NODE_TYPE  = "NeoMultiImageLoader";
+const NODE_TYPES = ["NeoMultiImageLoader"];
 const UPLOAD_URL = "/multi_image_loader/upload";
 
 // Layout constants (px)
@@ -1866,7 +1866,7 @@ function createWidget(node) {
           const name = parts.pop();
           const subfolder = parts.join("/");
           const payload = JSON.stringify({
-            source: "MultiImageLoader",
+            source: "NeoMultiImageLoader",
             name,
             filename: name,
             subfolder,
@@ -9361,7 +9361,7 @@ function createWidget(node) {
 // ─── Extension registration ───────────────────────────────────────────────────
 
 app.registerExtension({
-  name: "MultiImageLoader",
+  name: "NeoMultiImageLoader",
 
   // ── Global Ctrl+V clipboard paste ──────────────────────────────────────────
   setup() {

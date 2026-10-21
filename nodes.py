@@ -495,12 +495,29 @@ def _fit_image(img: Image.Image, target_w: int, target_h: int, mode: str, bg_col
     """
     Resize `img` to (target_w, target_h) using the requested fit strategy.
     If global_scale is used, the post-fit resulting canvas is scaled down and centered inside the final bounds.
-    """
-    if mode == "original":
-        return img.copy()
 
+    `original` keeps the source pixel data unscaled and simply centers it on a target-size canvas,
+    preserving aspect ratio without creating a mixed-size batch. This keeps batch tensors consistent
+    while still avoiding any pre-fit resize/crop on the source image itself.
+    """
     canvas = Image.new("RGB", (target_w, target_h), bg_color)
     src_w, src_h = img.size
+
+    if mode == "original":
+        paste_x = (target_w - src_w) // 2
+        paste_y = (target_h - src_h) // 2
+        if img.mode == "RGBA":
+            canvas.paste(img, (paste_x, paste_y), mask=img.split()[3])
+        else:
+            canvas.paste(img, (paste_x, paste_y))
+        if global_scale != 1.0:
+            scaled_w = max(1, round(target_w * global_scale))
+            scaled_h = max(1, round(target_h * global_scale))
+            shrunk = canvas.resize((scaled_w, scaled_h), Image.BICUBIC)
+            final_canvas = Image.new("RGB", (target_w, target_h), bg_color)
+            final_canvas.paste(shrunk, ((target_w - scaled_w) // 2, (target_h - scaled_h) // 2))
+            return final_canvas
+        return canvas
 
     if mode == "fill":
         resized = img.resize((target_w, target_h), Image.BICUBIC)
@@ -1608,16 +1625,10 @@ NODE_CLASS_MAPPINGS = {
     "NeoMultiImageLoader": MultiImageLoader,
     "NeoLoadImagesInGrid": LoadImagesInGrid,
     "NeoScaleControl": ScaleControl,
-    "MultiImageLoader": MultiImageLoader,
-    "LoadImagesInGrid": LoadImagesInGrid,
-    "ScaleControl": ScaleControl,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "NeoMultiImageLoader": "neo - Load Multiple Images 🖼️",
     "NeoLoadImagesInGrid": "neo - Load Images in Grid (Deprecated) 🖼️",
     "NeoScaleControl": "neo - Scale Control 🔍",
-    "MultiImageLoader": "Load Multiple Images 🖼️",
-    "LoadImagesInGrid": "Load Images in Grid (Deprecated) 🖼️",
-    "ScaleControl": "Scale Control 🔍",
 }

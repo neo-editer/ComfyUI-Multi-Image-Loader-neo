@@ -87,8 +87,8 @@ import { api } from "../../scripts/api.js";
 
 // ─── constants ───────────────────────────────────────────────────────────────
 
-const NODE_TYPE  = "LoadImagesInGrid";
-const NODE_TYPES = ["LoadImagesInGrid", "NeoLoadImagesInGrid"];
+const NODE_TYPE  = "NeoLoadImagesInGrid";
+const NODE_TYPES = ["NeoLoadImagesInGrid"];
 const UPLOAD_URL = "/multi_image_loader/upload";
 
 // Layout constants (px)
@@ -1436,7 +1436,7 @@ function createWidget(node) {
           const name = parts.pop();
           const subfolder = parts.join("/");
           const payload = JSON.stringify({
-            source: "MultiImageLoader",
+            source: "NeoLoadImagesInGrid",
             name,
             filename: name,
             subfolder,
@@ -7905,7 +7905,7 @@ function createWidget(node) {
 // ─── Extension registration ───────────────────────────────────────────────────
 
 app.registerExtension({
-  name: "LoadImagesInGrid",
+  name: "NeoLoadImagesInGrid",
 
   // ── Global Ctrl+V clipboard paste ──────────────────────────────────────────
   setup() {
