@@ -474,6 +474,55 @@ def _compute_canvas_dims(aspect_ratio: str, megapixels: float, first_img_size=No
     return (w, h)
 
 
+def _compute_individual_ratio_bounds(filenames, input_dir, megapixels=1, images=None):
+    """Compute a safe shared canvas for the 'Individual Ratios' mode.
+
+    Mixed-ratio batches still need a single tensor shape, so we choose a shared
+    canvas based on the largest source dimensions seen in the batch while still
+    respecting the megapixel budget. This keeps the batch valid while preserving
+    each image's aspect ratio within the chosen canvas via fit/crop logic.
+    """
+    candidates = []
+
+    if images is not None:
+        try:
+            if hasattr(images, "shape") and len(images.shape) == 4:
+                candidates.append((int(images.shape[2]), int(images.shape[1])))
+        except Exception:
+            pass
+
+    for fname in filenames:
+        fpath = input_dir / fname
+        if not fpath.exists():
+            continue
+        try:
+            with Image.open(fpath) as img:
+                img = ImageOps.exif_transpose(img)
+                candidates.append(img.size)
+        except Exception:
+            continue
+
+    if not candidates:
+        return (512, 512, 512, 512)
+
+    max_w = max(w for w, h in candidates)
+    max_h = max(h for w, h in candidates)
+
+    if megapixels <= 0:
+        ref_w, ref_h = max_w, max_h
+    else:
+        target_px = max(1, int(megapixels * 1_000_000))
+        ratio = max_w / max_h if max_h else 1.0
+        ref_w = max(1, round(math.sqrt(target_px * ratio)))
+        ref_h = max(1, round(math.sqrt(target_px / ratio)))
+        # never shrink below the largest source dimension, otherwise mixed ratios
+        # can cause visible loss and out-of-range canvas behavior
+        ref_w = max(ref_w, max_w)
+        ref_h = max(ref_h, max_h)
+
+    return (ref_w, ref_h, ref_w, ref_h)
+
+
 def _parse_hex_color(hex_str: str) -> tuple:
     """Convert '#RRGGBB' hex string to (R, G, B) tuple. Defaults to gray."""
     hex_str = hex_str.strip()
