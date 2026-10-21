@@ -1334,10 +1334,17 @@ class MultiImageLoader:
                 # ── Original-resolution branch (no megapixel budget) ──
                 img_orig = img.copy()
                 t_orig = transforms.get(fname)
-                if t_orig:
-                    img_orig = _apply_crop_transform(img_orig, t_orig, orig_ref_w, orig_ref_h, fit_mode=fit_mode, node_bg_color=_parse_bg_color_word(bg_color), global_scale=1.0)
-                elif img_orig.size != (orig_ref_w, orig_ref_h):
-                    img_orig = _fit_image(img_orig, orig_ref_w, orig_ref_h, fit_mode, bg_color=_parse_bg_color_word(bg_color), global_scale=1.0)
+                if fit_mode == "original":
+                    # Preserve the true native size/aspect ratio for the original-output path.
+                    # We do not force a shared canvas here; that would reintroduce the padding
+                    # that this mode is supposed to avoid.
+                    if t_orig:
+                        img_orig = _apply_crop_transform(img_orig, t_orig, img_orig.width, img_orig.height, fit_mode="letterbox", node_bg_color=_parse_bg_color_word(bg_color), global_scale=1.0)
+                else:
+                    if t_orig:
+                        img_orig = _apply_crop_transform(img_orig, t_orig, orig_ref_w, orig_ref_h, fit_mode=fit_mode, node_bg_color=_parse_bg_color_word(bg_color), global_scale=1.0)
+                    elif img_orig.size != (orig_ref_w, orig_ref_h):
+                        img_orig = _fit_image(img_orig, orig_ref_w, orig_ref_h, fit_mode, bg_color=_parse_bg_color_word(bg_color), global_scale=1.0)
 
                 # Composite over background if still RGBA, otherwise convert to RGB
                 if img_orig.mode == "RGBA":
@@ -1350,8 +1357,9 @@ class MultiImageLoader:
                 native_arr = np.array(img_orig).astype(np.float32) / 255.0
                 native_image_list.append(torch.from_numpy(native_arr))
 
-                orig_arr = np.array(img_orig).astype(np.float32) / 255.0
-                orig_tensors.append(torch.from_numpy(orig_arr).unsqueeze(0))
+                if fit_mode != "original":
+                    orig_arr = np.array(img_orig).astype(np.float32) / 255.0
+                    orig_tensors.append(torch.from_numpy(orig_arr).unsqueeze(0))
 
                 # ── Scaled branch (megapixel budget) ──
                 img = _scale_to_megapixels(img, megapixels)
@@ -1431,11 +1439,17 @@ class MultiImageLoader:
         batch      = torch.cat(tensors, dim=0)
         mask_batch = torch.cat(mask_tensors, dim=0)
         orig_batch = torch.cat(orig_tensors, dim=0) if orig_tensors else placeholder_img
-        
+
+        if fit_mode == "original":
+            image_original_out = native_image_list if native_image_list else [placeholder_img.squeeze(0)]
+            grid_hires = self._make_grid(batch, grid_rows, grid_columns, randomize, image_list, selected_items)
+        else:
+            image_original_out = orig_batch
+            grid_hires = self._make_grid(orig_batch, grid_rows, grid_columns, randomize, image_list, selected_items)
+
         grid_image = self._make_grid(batch, grid_rows, grid_columns, randomize, image_list, selected_items)
-        grid_hires = self._make_grid(orig_batch, grid_rows, grid_columns, randomize, image_list, selected_items)
-        
-        return (batch, mask_batch, orig_batch, grid_image, grid_hires, native_image_list, resolved_ar, grid_columns, grid_rows)
+
+        return (batch, mask_batch, image_original_out, grid_image, grid_hires, native_image_list, resolved_ar, grid_columns, grid_rows)
 
     def _make_grid(self, batch, rows, cols, randomize="None", image_list="[]", selected_items="[]"):
         import torch, random, json
