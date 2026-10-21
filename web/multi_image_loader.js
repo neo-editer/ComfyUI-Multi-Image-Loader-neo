@@ -88,6 +88,7 @@ import { api } from "../../scripts/api.js";
 // ─── constants ───────────────────────────────────────────────────────────────
 
 const NODE_TYPE  = "MultiImageLoader";
+const NODE_TYPES = ["MultiImageLoader", "NeoMultiImageLoader"];
 const UPLOAD_URL = "/multi_image_loader/upload";
 
 // Layout constants (px)
@@ -9384,7 +9385,7 @@ app.registerExtension({
      *   3. If exactly one is selected, forward the clipboard image to it.
      */
     function getMILNodes() {
-      return (app.graph._nodes || []).filter(n => n.type === NODE_TYPE);
+      return (app.graph._nodes || []).filter(n => NODE_TYPES.includes(n.type));
     }
     function getTargetNode() {
       const milNodes = getMILNodes();
@@ -9516,7 +9517,7 @@ app.registerExtension({
   },
 
   async beforeRegisterNodeDef(nodeType, nodeData) {
-    if (nodeData.name !== NODE_TYPE) return;
+    if (!NODE_TYPES.includes(nodeData.name)) return;
 
     nodeType.canvasOnly = true; // Force classic canvas rendering for compatibility with Nodes 2.0
     const origOnCreated   = nodeType.prototype.onNodeCreated;
