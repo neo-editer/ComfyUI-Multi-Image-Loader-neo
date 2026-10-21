@@ -1566,6 +1566,75 @@ class LoadImagesInGrid(MultiImageLoader):
 
 # ─── Scale Control Node ───────────────────────────────────────────────────────
 
+class GetNativeImageFromList:
+    """
+    Consume the native per-image list output and return a single original-size image.
+    Unlike the standard IMAGE batch path, this node works with list-based outputs that
+    preserve each image's own aspect ratio without forcing them into a shared canvas.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "index": ("INT", {"default": 0, "min": 0, "max": 9999, "display": "number"}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "get_native_image"
+    CATEGORY = "image/select"
+    OUTPUT_NODE = False
+
+    @classmethod
+    def IS_CHANGED(cls, images=None, index=0):
+        if images is None:
+            return hashlib.md5(f"native:{index}:none".encode()).hexdigest()
+        if isinstance(images, list):
+            return hashlib.md5(f"native:{index}:{len(images)}".encode()).hexdigest()
+        if isinstance(images, torch.Tensor):
+            return hashlib.md5(f"native:{index}:{tuple(images.shape)}".encode()).hexdigest()
+        return hashlib.md5(f"native:{index}:unknown".encode()).hexdigest()
+
+    def get_native_image(self, images=None, index=0):
+        placeholder = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+
+        if images is None:
+            return (placeholder,)
+
+        if isinstance(images, list):
+            if not images:
+                return (placeholder,)
+            img = images[min(max(index, 0), len(images) - 1)]
+        elif isinstance(images, torch.Tensor):
+            if images.dim() == 3:
+                return (images.unsqueeze(0),)
+            if images.dim() == 4:
+                if images.shape[0] == 0:
+                    return (placeholder,)
+                img = images[min(max(index, 0), images.shape[0] - 1)]
+            else:
+                return (images,)
+        else:
+            return (images,)
+
+        if isinstance(img, torch.Tensor):
+            if img.dim() == 3:
+                return (img.unsqueeze(0),)
+            return (img,)
+
+        if isinstance(img, (list, tuple)) and img:
+            first = img[0]
+            if isinstance(first, torch.Tensor):
+                if first.dim() == 3:
+                    return (first.unsqueeze(0),)
+                return (first,)
+
+        return (placeholder,)
+
+
 class ScaleControl:
     """
     Downstream scale control for image batches and grids produced by MultiImageLoader.
@@ -1687,11 +1756,13 @@ class ScaleControl:
 NODE_CLASS_MAPPINGS = {
     "NeoMultiImageLoader": MultiImageLoader,
     "NeoLoadImagesInGrid": LoadImagesInGrid,
+    "NeoGetNativeImageFromList": GetNativeImageFromList,
     "NeoScaleControl": ScaleControl,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "NeoMultiImageLoader": "neo - Load Multiple Images 🖼️",
     "NeoLoadImagesInGrid": "neo - Load Images in Grid (Deprecated) 🖼️",
+    "NeoGetNativeImageFromList": "neo - Get Native Image From List",
     "NeoScaleControl": "neo - Scale Control 🔍",
 }
