@@ -1440,8 +1440,13 @@ class MultiImageLoader:
         mask_batch = torch.cat(mask_tensors, dim=0)
         orig_batch = torch.cat(orig_tensors, dim=0) if orig_tensors else placeholder_img
 
+        # Keep the list-based native output for custom native consumers (e.g. NeoGetNativeImageFromList).
+        # Do not expose that list on the main previewable IMAGE socket, because Comfy preview nodes expect a
+        # proper tensor batch with .shape; a Python list cannot be previewed as a batch tensor.
         if fit_mode == "original":
-            image_original_out = native_image_list if native_image_list else [placeholder_img.squeeze(0)]
+            # Use a tensor-safe preview value for the main image_original output while preserving the native
+            # list on the dedicated native_images socket.
+            image_original_out = orig_batch if orig_tensors else batch
             grid_hires = self._make_grid(batch, grid_rows, grid_columns, randomize, image_list, selected_items)
         else:
             image_original_out = orig_batch
