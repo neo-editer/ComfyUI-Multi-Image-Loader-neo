@@ -155,7 +155,7 @@ async def preview_transform_handler(request):
         ref_h     = max(32, int(data.get("refH", 512)))
         global_scale = float(data.get("globalScale", 1.0))
         fit_mode  = data.get("fitMode", "letterbox")
-        if fit_mode not in ("letterbox", "crop"):
+        if fit_mode not in ("letterbox", "crop", "original"):
             fit_mode = "letterbox"
 
         if not filename:
@@ -496,6 +496,9 @@ def _fit_image(img: Image.Image, target_w: int, target_h: int, mode: str, bg_col
     Resize `img` to (target_w, target_h) using the requested fit strategy.
     If global_scale is used, the post-fit resulting canvas is scaled down and centered inside the final bounds.
     """
+    if mode == "original":
+        return img.copy()
+
     canvas = Image.new("RGB", (target_w, target_h), bg_color)
     src_w, src_h = img.size
 
@@ -997,7 +1000,7 @@ class MultiImageLoader:
                 "aspect_ratio_in": ("STRING", {"forceInput": True}),
                 # JSON list of filenames persisted in the workflow JSON.
                 "image_list":   ("STRING", {"default": "[]"}),
-                "fit_mode":     (["letterbox", "crop"],),
+                "fit_mode":     (["letterbox", "crop", "original"],),
                 "bg_color":     (["gray", "black", "white", "red"],
                                  {"default": "gray"}),
                 "aspect_ratio": (["Starred image", "Image Input", "Aspect Ratio Input", "Individual Ratios", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"],
@@ -1075,7 +1078,7 @@ class MultiImageLoader:
         placeholder_img  = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
         placeholder_mask = torch.ones((1, 64, 64), dtype=torch.float32)
         if not filtered_filenames and images is None:
-            return (placeholder_img, placeholder_mask, placeholder_img, placeholder_img, placeholder_img, [placeholder_img], resolved_ar, grid_columns, grid_rows)
+            return (placeholder_img, placeholder_mask, placeholder_img, placeholder_img, placeholder_img, [placeholder_img.squeeze(0)], resolved_ar, grid_columns, grid_rows)
 
         input_dir = Path(folder_paths.get_input_directory())
         tensors      = []
@@ -1279,7 +1282,7 @@ class MultiImageLoader:
                     img_orig = img_orig.convert("RGB")
 
                 native_arr = np.array(img_orig).astype(np.float32) / 255.0
-                native_image_list.append(torch.from_numpy(native_arr).unsqueeze(0))
+                native_image_list.append(torch.from_numpy(native_arr))
 
                 orig_arr = np.array(img_orig).astype(np.float32) / 255.0
                 orig_tensors.append(torch.from_numpy(orig_arr).unsqueeze(0))
@@ -1357,7 +1360,7 @@ class MultiImageLoader:
                 resolved_ar = "auto"
 
         if not tensors:
-            return (placeholder_img, placeholder_mask, placeholder_img, placeholder_img, placeholder_img, [placeholder_img], resolved_ar, grid_columns, grid_rows)
+            return (placeholder_img, placeholder_mask, placeholder_img, placeholder_img, placeholder_img, [placeholder_img.squeeze(0)], resolved_ar, grid_columns, grid_rows)
 
         batch      = torch.cat(tensors, dim=0)
         mask_batch = torch.cat(mask_tensors, dim=0)

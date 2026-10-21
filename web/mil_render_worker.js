@@ -168,6 +168,19 @@ async function handleCropTransform(bitmap, p) {
 async function handleFitPreview(bitmap, p) {
   const { targetW, targetH, mode, bgColor } = p;
 
+  if (mode === "original") {
+    const cvs = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const ctx = cvs.getContext("2d");
+    ctx.clearRect(0, 0, bitmap.width, bitmap.height);
+    ctx.drawImage(bitmap, 0, 0, bitmap.width, bitmap.height);
+    const blob = await cvs.convertToBlob({ type: "image/png" });
+    const arrayBuf = await blob.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuf);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return "data:image/png;base64," + btoa(binary);
+  }
+
   const cvs = new OffscreenCanvas(targetW, targetH);
   const ctx = cvs.getContext("2d");
 

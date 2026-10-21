@@ -2610,6 +2610,9 @@ function createWidget(node) {
 
     // No crop transform — apply letterbox/crop fit vs reference dims
     const mode = getFitModeWidget()?.value ?? "letterbox";
+    if (mode === "original") {
+      return item.src;
+    }
     const el = await loadImage(item.src);
     const cvs = document.createElement("canvas");
     cvs.width = refW; cvs.height = refH;
@@ -2651,6 +2654,19 @@ function createWidget(node) {
 
     const mode = getFitModeWidget()?.value ?? "letterbox";
     const ar = getAspectRatioWidget()?.value ?? "Starred image";
+
+    if (mode === "original") {
+      for (let i = 0; i < items.length; i++) {
+        if (!hasCrop(items[i].filename)) items[i].previewSrc = items[i].src;
+      }
+      previewActive = true;
+      render();
+      return;
+    }
+
+    if (mode === "original") {
+      return item.src;
+    }
 
     try {
       const { refW: targetW, refH: targetH } = await computeRefDims();
