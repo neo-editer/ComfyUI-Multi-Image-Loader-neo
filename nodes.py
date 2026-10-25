@@ -23,11 +23,26 @@ async def upload_images_handler(request):
         saved = []
         input_dir = Path(folder_paths.get_input_directory())
         input_dir.mkdir(parents=True, exist_ok=True)
+        # Optional destination folder (absolute, or relative to the input dir).
+        # Sent by the frontend when the node has a custom_path set.
+        dest_dir = None
 
         while True:
             part = await reader.next()
             if part is None:
                 break
+            if part.name == "custom_path":
+                raw_path = (await part.read()).decode(errors="ignore").strip()
+                if raw_path:
+                    candidate = Path(os.path.expanduser(raw_path))
+                    if not candidate.is_absolute():
+                        candidate = input_dir / candidate
+                    try:
+                        candidate.mkdir(parents=True, exist_ok=True)
+                        dest_dir = candidate
+                    except Exception as e:
+                        print(f"[MIL upload] ignoring custom_path '{raw_path}': {e}")
+                continue
             if part.name != "images":
                 continue
 
@@ -43,7 +58,7 @@ async def upload_images_handler(request):
             while True:
                 suffix = f"_{counter}" if counter > 0 else ""
                 safe_name = f"mil_{hash_prefix}_{stem}{suffix}{ext}"
-                dest = input_dir / safe_name
+                dest = (dest_dir or input_dir) / safe_name
                 if not dest.exists():
                     break
                 counter += 1

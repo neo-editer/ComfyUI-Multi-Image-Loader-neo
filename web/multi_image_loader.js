@@ -88,8 +88,25 @@ import { api } from "../../scripts/api.js";
 // ─── constants ───────────────────────────────────────────────────────────────
 
 const NODE_TYPE  = "NeoMultiImageLoader";
-const NODE_TYPES = ["NeoMultiImageLoader"];
+const MEDIA_NODE_TYPE = "NeoMultiMediaLoader";
+const NODE_TYPES = ["NeoMultiImageLoader", "NeoMultiMediaLoader"];
 const UPLOAD_URL = "/multi_image_loader/upload";
+
+// Video files cannot render in an <img>; the backend serves a poster frame.
+const VIDEO_EXTS = [".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".mpg", ".mpeg", ".wmv", ".flv", ".ts", ".mts", ".3gp"];
+const MEDIA_EXT_HINT = "PNG · JPG · WebP · BMP · GIF · MP4 · WebM · MOV · MKV";
+
+function isVideoFile(filename) {
+  const clean = (filename || "").split("?")[0].toLowerCase();
+  return VIDEO_EXTS.some((ext) => clean.endsWith(ext));
+}
+
+/** True for files the media node can ingest (video detection also by extension). */
+function isMediaFile(file) {
+  const type = (file?.type || "").toLowerCase();
+  if (type.startsWith("image/") || type.startsWith("video/")) return true;
+  return isVideoFile(file?.name);
+}
 
 // Layout constants (px)
 const NODE_HEADER_H  = 30;
@@ -105,8 +122,9 @@ const COMPACT_DROPZONE_H = 32;  // collapsed height when images are loaded
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-async function uploadFiles(files) {
+async function uploadFiles(files, customPath = "") {
   const fd = new FormData();
+  if (customPath) fd.append("custom_path", customPath);
   for (const f of files) fd.append("images", f, f.name);
   const resp = await fetch(UPLOAD_URL, { method: "POST", body: fd });
   if (!resp.ok) throw new Error(`Upload failed: ${resp.status}`);
@@ -193,7 +211,7 @@ async function filesFromDataTransfer(dt) {
     });
     return [file];
   }
-  return [...(dt.files || [])].filter((f) => f.type?.startsWith("image/"));
+  return [...(dt.files || [])].filter((f) => isMediaFile(f));
 }
 
 // Inject global CSS once (scrollbars + drag styles)
@@ -382,9 +400,9 @@ function createWidget(node) {
     box-sizing: border-box;
   `;
   dropZone.innerHTML = `
-    <div style="font-size:18px;margin-bottom:2px;">🖼️</div>
-    <div><strong>Drop images here</strong> or <strong>click to browse</strong></div>
-    <div style="opacity:0.6;margin-top:4px;font-size:10px;">PNG · JPG · WebP · BMP</div>
+    <div style="font-size:18px;margin-bottom:2px;">${node.type === MEDIA_NODE_TYPE ? "🎬" : "🖼️"}</div>
+    <div><strong>Drop ${node.type === MEDIA_NODE_TYPE ? "media" : "images"} here</strong> or <strong>click to browse</strong></div>
+    <div style="opacity:0.6;margin-top:4px;font-size:10px;">${node.type === MEDIA_NODE_TYPE ? MEDIA_EXT_HINT : "PNG · JPG · WebP · BMP"}</div>
     <div style="opacity:0.5;margin-top:6px;font-size:9px;">Fixed aspect ratio or driven by the ⭐ Starred Image</div>
   `;
 
@@ -401,7 +419,9 @@ function createWidget(node) {
   const fileInput = document.createElement("input");
   fileInput.type = "file";
   fileInput.multiple = true;
-  fileInput.accept = "image/*";
+  fileInput.accept = node.type === MEDIA_NODE_TYPE
+    ? "image/*,video/*,.gif,.webp,.apng,.mp4,.webm,.mov,.mkv,.avi,.m4v"
+    : "image/*";
   fileInput.style.display = "none";
   root.appendChild(fileInput);
 
@@ -1238,6 +1258,30 @@ function createWidget(node) {
     return node.widgets?.find((w) => w.name === "bg_color");
   }
 
+  /** Optional folder used for uploads and for resolving media outside input/. */
+  function getCustomPathWidget() {
+    return node.widgets?.find((w) => w.name === "custom_path");
+  }
+
+  function getCustomPath() {
+    return (getCustomPathWidget()?.value || "").trim();
+  }
+
+  /**
+   * Resolve a display URL for a stored media entry.
+   * Videos (and files living in a custom folder) are served by the backend
+   * poster route, because /view only exposes ComfyUI's input directory.
+   */
+  function itemSrcURL(filename) {
+    const customPath = getCustomPath();
+    if (customPath || isVideoFile(filename)) {
+      const params = new URLSearchParams({ filename, max: "1024" });
+      if (customPath) params.set("custom_path", customPath);
+      return `/multi_image_loader/media_thumb?${params.toString()}`;
+    }
+    return viewURL(filename);
+  }
+
   /** Returns the effective hex bg color from the bg_color widget.
    *  Handles both word labels (gray/black/white) and legacy hex (#808080/#000000/#ffffff). */
   function getEffectiveBgColor() {
@@ -1612,19 +1656,20 @@ function createWidget(node) {
   grid.addEventListener("scroll", updateScrollFade);
 
   function updateDropZone(count) {
+    const mediaNode = node.type === MEDIA_NODE_TYPE;
     if (count > 0) {
       dropZone.style.minHeight     = `${COMPACT_DROPZONE_H}px`;
       dropZone.style.padding       = "0 12px";
       dropZone.style.flexDirection = "row";
-      dropZone.innerHTML = `<span style="font-size:10px;opacity:0.6;">＋ Drop or click to add more images</span>`;
+      dropZone.innerHTML = `<span style="font-size:10px;opacity:0.6;">＋ Drop or click to add more ${mediaNode ? "media" : "images"}</span>`;
     } else {
       dropZone.style.minHeight     = `${DROPZONE_H}px`;
       dropZone.style.padding       = "14px 10px";
       dropZone.style.flexDirection = "column";
       dropZone.innerHTML = `
-        <div style="font-size:18px;margin-bottom:2px;">🖼️</div>
-        <div><strong>Drop images here</strong> or <strong>click to browse</strong></div>
-        <div style="opacity:0.6;margin-top:4px;font-size:10px;">PNG · JPG · WebP · BMP</div>
+        <div style="font-size:18px;margin-bottom:2px;">${mediaNode ? "🎬" : "🖼️"}</div>
+        <div><strong>Drop ${mediaNode ? "media" : "images"} here</strong> or <strong>click to browse</strong></div>
+        <div style="opacity:0.6;margin-top:4px;font-size:10px;">${mediaNode ? MEDIA_EXT_HINT : "PNG · JPG · WebP · BMP"}</div>
         <div style="opacity:0.5;margin-top:6px;font-size:9px;">Fixed aspect ratio or driven by the ⭐ Starred Image</div>
       `;
     }
@@ -2866,7 +2911,7 @@ function createWidget(node) {
       const isBlank = fn.startsWith("__BLANK__");
       const src = isBlank 
         ? "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
-        : viewURL(fn);
+        : itemSrcURL(fn);
       return { filename: fn, src: src, is_blank: isBlank };
     });
 
@@ -2896,7 +2941,7 @@ function createWidget(node) {
     }
 
     try {
-      const { w: iw, h: ih } = await getImageDimensions(viewURL(filenames[0]));
+      const { w: iw, h: ih } = await getImageDimensions(itemSrcURL(filenames[0]));
       thumbH = Math.max(20, Math.round(THUMB_W * ih / iw));
     } catch {
       thumbH = THUMB_W;
@@ -2912,19 +2957,31 @@ function createWidget(node) {
   // ── addFiles (called by drag-drop / file picker) ──────────────────────────
 
   async function addFiles(files, insertIdx = -1) {
-    const imageFiles = Array.from(files).filter((f) => f.type.startsWith("image/"));
-    if (!imageFiles.length) return;
+    const mediaNode = node.type === MEDIA_NODE_TYPE;
+    const acceptedFiles = Array.from(files).filter((f) =>
+      mediaNode ? isMediaFile(f) : (f.type || "").startsWith("image/")
+    );
+    if (!acceptedFiles.length) return;
 
     statusLabel.textContent = "Uploading…";
     statusLabel.style.color = "#ffcc66";
 
     try {
-      const dataURLs  = await Promise.all(imageFiles.map(fileToDataURL));
-      const filenames = await uploadFiles(imageFiles);
+      // Videos cannot be inlined into an <img>; a poster frame is served instead.
+      const needsPoster = acceptedFiles.map(
+        (f) => (f.type || "").startsWith("video/") || isVideoFile(f.name)
+      );
+      const dataURLs = await Promise.all(
+        acceptedFiles.map((f, i) => (needsPoster[i] ? Promise.resolve("") : fileToDataURL(f)))
+      );
+      const filenames = await uploadFiles(acceptedFiles, mediaNode ? getCustomPath() : "");
 
       pushUndoState();
       
-      const newItems = filenames.map((fn, i) => ({ filename: fn, src: dataURLs[i] }));
+      const newItems = filenames.map((fn, i) => ({
+        filename: fn,
+        src: needsPoster[i] ? itemSrcURL(fn) : dataURLs[i],
+      }));
       const insertedCount = newItems.length;
       let startFlashIdx = 0;
       

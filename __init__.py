@@ -1,13 +1,16 @@
 from .nodes import NODE_CLASS_MAPPINGS as MULTI_IMAGE_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as MULTI_IMAGE_DISPLAY
+from .media_loader import NODE_CLASS_MAPPINGS as MULTI_MEDIA_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS as MULTI_MEDIA_DISPLAY
 from .batch_to_grid import FromBatchToGrid
 
 NODE_CLASS_MAPPINGS = {
     **MULTI_IMAGE_MAPPINGS,
+    **MULTI_MEDIA_MAPPINGS,
     "NeoFromBatchToGrid": FromBatchToGrid,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     **MULTI_IMAGE_DISPLAY,
+    **MULTI_MEDIA_DISPLAY,
     "NeoFromBatchToGrid": "neo - From Batch to Grid",
 }
 

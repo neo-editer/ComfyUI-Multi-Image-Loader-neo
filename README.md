@@ -17,8 +17,33 @@
 
 ## 🛠️ Components
 
-1.  **MultiImageLoader Node**: The core backend node responsible for tensor stacking and resizing.
-2.  **JavaScript Extension**: Injects a custom drag-and-drop / file-picker widget into the ComfyUI graph.
+1.  **`neo - Load Multiple Images`** (`NeoMultiImageLoader`): the core node for drag-and-drop image batches.
+2.  **`neo - Multi Media Loader`** (`NeoMultiMediaLoader`): same node and features, but the drop zone also accepts **videos** (mp4, webm, mov, mkv, avi…) and **animated GIF / WebP**. Videos are decoded into frames with `ffmpeg` and then fed through the exact same pipeline as still images.
+3.  **`neo - Get Native Image From List`**: picks one image out of the native (per-image original size) list output.
+4.  **`neo - Scale Control`**, **`neo - From Batch to Grid`**: downstream helpers.
+5.  **JavaScript Extension**: injects the custom drag-and-drop / file-picker widget into the ComfyUI graph.
+
+### 🎬 Multi Media Loader — video options
+
+| Widget | Default | Meaning |
+|---|---|---|
+| `video_fps` | `8.0` | Frames per second sampled from a video |
+| `video_max_frames` | `24` | Maximum frames decoded per video |
+| `gif_max_frames` | `24` | Maximum frames decoded per animated image |
+
+Decoded frames are cached under `ComfyUI/input/mil_frames/<hash>/`, keyed by the video's
+path, size, mtime and sampling settings — re-running does not re-decode.
+
+### 📁 Custom path (`custom_path`)
+
+Optional. Both new uploads **and** filename lookups use it:
+
+* absolute path, e.g. `D:/projects/media`
+* or a path relative to `ComfyUI/input`, e.g. `my_media`
+
+Files outside `ComfyUI/input` are served to the UI through the
+`/multi_image_loader/media_thumb` route (the standard `/view` endpoint cannot reach them).
+Video thumbnails use the same route to show a poster frame.
 
 ---
 
