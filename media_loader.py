@@ -456,7 +456,7 @@ class MultiMediaLoader(MultiImageLoader):
             if transform:
                 frame_transforms[frame_name] = transform
 
-        return MultiImageLoader.load_images(
+        result = MultiImageLoader.load_images(
             self,
             images=images,
             aspect_ratio_in=aspect_ratio_in,
@@ -474,6 +474,17 @@ class MultiMediaLoader(MultiImageLoader):
             grid_rows=grid_rows,
             randomize=randomize,
         )
+
+        # Report the folder the media is resolved from: custom_path or the input dir.
+        folder = (custom_path or "").strip()
+        if folder:
+            base = Path(os.path.expanduser(folder))
+            if not base.is_absolute():
+                base = _input_dir() / base
+            folder_path = str(base)
+        else:
+            folder_path = str(_input_dir())
+        return (*result[:-1], folder_path)
 
 
 # ─── registrations ───────────────────────────────────────────────────────────

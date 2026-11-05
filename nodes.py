@@ -1099,8 +1099,8 @@ class MultiImageLoader:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "STRING", "INT", "INT",)
-    RETURN_NAMES = ("image_batch", "mask_batch", "image_original", "grid_image", "grid_hires", "native_images", "aspect_ratio_out", "columns_n", "rows_n",)
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "STRING", "INT", "INT", "STRING",)
+    RETURN_NAMES = ("image_batch", "mask_batch", "image_original", "grid_image", "grid_hires", "native_images", "aspect_ratio_out", "columns_n", "rows_n", "folder_path",)
     FUNCTION = "load_images"
     CATEGORY = "image/loaders"
     OUTPUT_NODE = False
@@ -1158,10 +1158,11 @@ class MultiImageLoader:
 
         placeholder_img  = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
         placeholder_mask = torch.ones((1, 64, 64), dtype=torch.float32)
-        if not filtered_filenames and images is None:
-            return (placeholder_img, placeholder_mask, placeholder_img, placeholder_img, placeholder_img, [placeholder_img.squeeze(0)], resolved_ar, grid_columns, grid_rows)
-
         input_dir = Path(folder_paths.get_input_directory())
+        folder_path = str(input_dir)
+        if not filtered_filenames and images is None:
+            return (placeholder_img, placeholder_mask, placeholder_img, placeholder_img, placeholder_img, [placeholder_img.squeeze(0)], resolved_ar, grid_columns, grid_rows, folder_path)
+
         tensors      = []
         mask_tensors = []
         orig_tensors = []   # native-resolution batch (no megapixel budget)
@@ -1449,7 +1450,7 @@ class MultiImageLoader:
                 resolved_ar = "auto"
 
         if not tensors:
-            return (placeholder_img, placeholder_mask, placeholder_img, placeholder_img, placeholder_img, [placeholder_img.squeeze(0)], resolved_ar, grid_columns, grid_rows)
+            return (placeholder_img, placeholder_mask, placeholder_img, placeholder_img, placeholder_img, [placeholder_img.squeeze(0)], resolved_ar, grid_columns, grid_rows, folder_path)
 
         batch      = torch.cat(tensors, dim=0)
         mask_batch = torch.cat(mask_tensors, dim=0)
@@ -1469,7 +1470,7 @@ class MultiImageLoader:
 
         grid_image = self._make_grid(batch, grid_rows, grid_columns, randomize, image_list, selected_items)
 
-        return (batch, mask_batch, image_original_out, grid_image, grid_hires, native_image_list, resolved_ar, grid_columns, grid_rows)
+        return (batch, mask_batch, image_original_out, grid_image, grid_hires, native_image_list, resolved_ar, grid_columns, grid_rows, folder_path)
 
     def _make_grid(self, batch, rows, cols, randomize="None", image_list="[]", selected_items="[]"):
         import torch, random, json
