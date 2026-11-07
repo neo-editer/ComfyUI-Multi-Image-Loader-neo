@@ -1822,19 +1822,6 @@ def _parse_filename_list(image_list: str) -> list:
     return [f for f in filenames if isinstance(f, str)]
 
 
-def _build_multi_out_outputs(entries, max_outputs: int) -> tuple:
-    """
-    One value per output index. Slots with no image (or an unreadable file)
-    return an ExecutionBlocker so the downstream branch is skipped instead of
-    receiving a bogus/blank image.
-    """
-    outputs = []
-    for i in range(max_outputs):
-        img = entries[i] if i < len(entries) else None
-        outputs.append(ExecutionBlocker(None) if img is None else img)
-    return tuple(outputs)
-
-
 # ─── Multi Image Multi Out ───────────────────────────────────────────────────
 
 class MultiImageMultiOut:
@@ -1844,10 +1831,11 @@ class MultiImageMultiOut:
     The order of the list is the order of the outputs: the first entry feeds
     `image_1`, the second `image_2`, and so on (up to MAX_OUTPUTS).
 
-    Outputs: `image_1 .. image_10`, followed by `image_list` (JSON string of the
-    filenames, used by "Get Multi Out"). Indices without an image return an
-    ExecutionBlocker, which silently skips whatever is connected to them.
-    `fixed_outputs` keeps that many sockets alive even with an empty list.
+    Outputs: `image_1 .. image_10`, followed by `images` — the processed images
+    as a single IMAGE batch (same order, same canvas, ready to route through
+    "Get Multi Out"). Indices without an image return an ExecutionBlocker,
+    which silently skips whatever is connected to them. `fixed_outputs` keeps
+    that many sockets alive even with an empty list.
 
     resize_mode:
         fit     → contain (whole image visible), padded with padding_color
@@ -1877,11 +1865,11 @@ class MultiImageMultiOut:
             },
         }
 
-    # Images first, then the JSON filename list (feeds "Get Multi Out").
-    # Keeping the JSON output LAST means adding/removing image sockets never
-    # changes the image slot indices of an existing graph.
-    RETURN_TYPES = ("IMAGE",) * MAX_OUTPUTS + ("STRING",)
-    RETURN_NAMES = tuple(f"image_{i + 1}" for i in range(MAX_OUTPUTS)) + ("image_list",)
+    # Images first, then the processed batch. The number of image values actually
+    # returned matches the number of image sockets shown, so socket indices always
+    # line up with the returned tuple (the frontend uses the same formula).
+    RETURN_TYPES = ("IMAGE",) * (MAX_OUTPUTS + 1)
+    RETURN_NAMES = tuple(f"image_{i + 1}" for i in range(MAX_OUTPUTS)) + ("images",)
     FUNCTION = "load_images"
     CATEGORY = "image/loaders"
     OUTPUT_NODE = False
@@ -1905,25 +1893,35 @@ class MultiImageMultiOut:
         for name in filenames:
             img = _load_multi_out_image(input_dir, name)
             if img is None:
-                tensors.append(None)
-                continue
+                # Keep index alignment with the list: use a blank instead of dropping it.
+                img = Image.new("RGB", (width, height), bg)
             img = _resize_multi_out(img, width, height, resize_mode, bg)
             arr = np.array(img).astype(np.float32) / 255.0
             tensors.append(torch.from_numpy(arr).unsqueeze(0))
 
-        return (*_build_multi_out_outputs(tensors, self.MAX_OUTPUTS), json.dumps(filenames))
+        # Must match the frontend: sockets = clamp(max(images, fixed_outputs), 0, 10)
+        socket_count = min(self.MAX_OUTPUTS, max(len(tensors), max(0, int(fixed_outputs or 0))))
+        sockets = [
+            tensors[i] if i < len(tensors) else ExecutionBlocker(None)
+            for i in range(socket_count)
+        ]
+        batch = torch.cat(tensors, dim=0) if tensors else ExecutionBlocker(None)
+        return (*sockets, batch)
 
 
 # ─── Get Multi Out ───────────────────────────────────────────────────────────
 
 class GetMultiOut:
     """
-    Reads the image list published by a Multi Image Multi Out node (connect its
-    `image_list` output here) and exposes those images as separate outputs.
+    Routes the already-processed images published by a Multi Image Multi Out
+    node (connect its `images` batch output here) into separate outputs.
 
-    `fixed_outputs` controls how many output sockets the node shows. Any index
-    with no image returns an ExecutionBlocker, so downstream nodes wired to it
-    are skipped instead of receiving an empty/bogus image.
+    Nothing is reloaded or resized here — each output is one slice of the batch,
+    so it keeps the loader's width/height/resize_mode/padding_color exactly.
+
+    `fixed_outputs` controls how many output sockets the node shows. Indices
+    beyond the batch return an ExecutionBlocker, so downstream nodes wired to
+    them are skipped instead of receiving an empty image.
     """
 
     MAX_OUTPUTS = 10
@@ -1933,16 +1931,11 @@ class GetMultiOut:
         return {
             "required": {
                 "fixed_outputs": ("INT", {"default": 5, "min": 0, "max": 10, "step": 1, "display": "number"}),
-                "resize_mode": (["native", "fit", "crop", "zoom", "padding"], {"default": "native"}),
-                "width":  ("INT", {"default": 1024, "min": 1, "max": 16384, "step": 1, "display": "number"}),
-                "height": ("INT", {"default": 1024, "min": 1, "max": 16384, "step": 1, "display": "number"}),
-                "padding_color": (["gray", "black", "white", "red", "green", "blue", "yellow", "magenta", "cyan"],
-                                  {"default": "gray"}),
             },
             "optional": {
-                # JSON filename list from a Multi Image Multi Out node.
+                # Processed batch from Multi Image Multi Out.
                 # Unconnected → every output is simply blocked.
-                "image_list": ("STRING", {"forceInput": True}),
+                "images": ("IMAGE", {"forceInput": True}),
             },
         }
 
@@ -1953,32 +1946,25 @@ class GetMultiOut:
     OUTPUT_NODE = False
 
     @classmethod
-    def IS_CHANGED(cls, image_list="[]", fixed_outputs=5, resize_mode="native",
-                   width=1024, height=1024, padding_color="gray"):
-        return hashlib.md5(
-            f"{image_list}|{fixed_outputs}|{width}x{height}|{resize_mode}|{padding_color}".encode()
-        ).hexdigest()
+    def IS_CHANGED(cls, fixed_outputs=5, images=None):
+        shape = tuple(images.shape) if hasattr(images, "shape") else "none"
+        return hashlib.md5(f"{fixed_outputs}|{shape}".encode()).hexdigest()
 
-    def get_images(self, image_list="[]", fixed_outputs=5, resize_mode="native",
-                   width=1024, height=1024, padding_color="gray"):
-        width  = max(1, int(width))
-        height = max(1, int(height))
-        bg = _parse_bg_color_word(padding_color)
+    def get_images(self, fixed_outputs=5, images=None):
+        blocked = tuple(ExecutionBlocker(None) for _ in range(self.MAX_OUTPUTS))
+        if images is None or not hasattr(images, "dim"):
+            return blocked
 
-        filenames = _parse_filename_list(image_list)[: self.MAX_OUTPUTS]
-        input_dir = Path(folder_paths.get_input_directory())
+        if images.dim() == 3:            # single image → treat as a batch of one
+            images = images.unsqueeze(0)
+        if images.dim() != 4:
+            return blocked
 
-        tensors = []
-        for name in filenames:
-            img = _load_multi_out_image(input_dir, name)
-            if img is None:
-                tensors.append(None)
-                continue
-            img = _resize_multi_out(img, width, height, resize_mode, bg)
-            arr = np.array(img).astype(np.float32) / 255.0
-            tensors.append(torch.from_numpy(arr).unsqueeze(0))
-
-        return _build_multi_out_outputs(tensors, self.MAX_OUTPUTS)
+        count = min(int(images.shape[0]), self.MAX_OUTPUTS)
+        return tuple(
+            images[i:i + 1] if i < count else ExecutionBlocker(None)
+            for i in range(self.MAX_OUTPUTS)
+        )
 
 
 # ─── Registrations ────────────────────────────────────────────────────────────

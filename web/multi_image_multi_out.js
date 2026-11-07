@@ -3,14 +3,15 @@
  *
  * Multi Image Multi Out: a plain ordered list (no thumbnails) where the row
  * order IS the output order: row 1 → image_1, row 2 → image_2, … (max 10),
- * plus a trailing `image_list` JSON output.
+ * plus a trailing `images` output carrying the processed batch.
  *
  * Socket count = clamp(max(images, fixed_outputs), 0, 10). Slots with no image
  * are labelled "(empty)" and the backend returns an ExecutionBlocker for them,
  * so whatever is connected downstream is skipped instead of erroring.
  *
- * Get Multi Out: takes that `image_list` JSON output and re-exposes the images
- * as its own sockets, also driven by fixed_outputs (same blocker behaviour).
+ * Get Multi Out: takes that `images` batch and slices it into its own sockets
+ * (no reloading/resizing), also driven by fixed_outputs — same blocker
+ * behaviour for indices beyond the batch.
  */
 
 import { app } from "../../scripts/app.js";
@@ -20,7 +21,7 @@ const GET_NODE_TYPE = "NeoGetMultiOut";
 const UPLOAD_URL  = "/multi_image_loader/upload";
 const MAX_OUTPUTS = 10;
 const LIST_WIDGET = "image_list";
-const STRING_OUT  = "image_list";
+const IMAGES_OUT  = "images";
 
 const NODE_HEADER_H  = 30;
 const NODE_SLOT_H    = 22;
@@ -120,64 +121,68 @@ function getNumberWidget(node, name, fallback = 0) {
 }
 
 /**
- * The JSON filename output ("image_list") is always the LAST socket, and the
- * image sockets live in front of it. That way adding/removing image sockets
- * never renumbers existing image links — only the (single, obvious) Get link
- * can move.
+ * The processed batch output ("images") is always the LAST socket, and the
+ * per-image sockets live in front of it. That way adding/removing image sockets
+ * never renumbers existing image links.
  */
-function ensureImageListOutput(node) {
+function ensureImagesOutput(node) {
   node.outputs ||= [];
-  if (node.outputs[node.outputs.length - 1]?.type === "STRING") return;
+  const last = node.outputs[node.outputs.length - 1];
+  if (last && last.name === IMAGES_OUT) return;
+
+  if (last && last.type === "STRING") {
+    // Workflow saved with the old JSON-output version → convert in place.
+    last.name = IMAGES_OUT;
+    last.type = "IMAGE";
+    return;
+  }
   // Appending never shifts existing slots.
-  addOutputSocket(node, STRING_OUT, "STRING");
+  addOutputSocket(node, IMAGES_OUT, "IMAGE");
 }
 
-/** Fix the JSON output's link origin after an image socket was inserted. */
-function fixStringOutputLinks(node) {
+/** Fix the batch output's link origin after an image socket was inserted. */
+function fixImagesOutputLinks(node) {
   const idx = node.outputs.length - 1;
   const slot = node.outputs[idx];
-  if (slot?.type !== "STRING" || !node.graph) return;
+  if (!slot || slot.name !== IMAGES_OUT || !node.graph) return;
   for (const id of slot.links || []) {
     const link = node.graph._links?.get(id);
     if (link) link.origin_slot = idx;
   }
 }
 
-/** Insert a new image socket directly before the trailing JSON output. */
+/** Insert a new image socket directly before the trailing batch output. */
 function insertImageSocket(node, name) {
   const strIdx = node.outputs.length - 1;
   const slot = { name, type: "IMAGE", links: null };
   node.outputs.splice(strIdx, 0, slot);
   node.onOutputAdded?.(slot);
-  fixStringOutputLinks(node);
+  fixImagesOutputLinks(node);
   // Links may not be registered yet when this runs during configure.
-  setTimeout(() => fixStringOutputLinks(node), 0);
+  setTimeout(() => fixImagesOutputLinks(node), 0);
   return slot;
 }
 
 /**
  * Sockets = clamp(max(images, fixed_outputs), 0, 10) image outputs + the
- * always-present JSON output at the end.
+ * always-present processed batch at the end.
  */
 function syncOutputs(node, imageCount) {
   node.outputs ||= [];
-  ensureImageListOutput(node);
+  ensureImagesOutput(node);
 
   const fixed = Math.max(0, Math.min(MAX_OUTPUTS, getNumberWidget(node, "fixed_outputs")));
   const want = Math.min(MAX_OUTPUTS, Math.max(imageCount, fixed));
 
-  // Everything except the trailing STRING socket is an image socket.
+  // Everything except the trailing batch socket is an image socket.
   while (node.outputs.length - 1 > want) removeOutputSocket(node, node.outputs.length - 2);
   while (node.outputs.length - 1 < want) insertImageSocket(node, `image_${node.outputs.length}`);
 
   node.outputs.forEach((slot, i) => {
-    if (i === node.outputs.length - 1) {
-      slot.name = STRING_OUT;
-      slot.type = "STRING";
-    } else {
-      slot.type = "IMAGE";
-      slot.name = i + 1 <= imageCount ? `image_${i + 1}` : `image_${i + 1} (empty)`;
-    }
+    slot.type = "IMAGE";
+    slot.name = i === node.outputs.length - 1
+      ? IMAGES_OUT
+      : (i + 1 <= imageCount ? `image_${i + 1}` : `image_${i + 1} (empty)`);
   });
 
   node.setDirtyCanvas(true, true);
