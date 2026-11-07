@@ -550,8 +550,18 @@ def _parse_hex_color(hex_str: str) -> tuple:
 
 
 def _parse_bg_color_word(word: str) -> tuple:
-    """Convert word label ('gray', 'black', 'white') to (R, G, B) tuple."""
-    mapping = {"gray": (128, 128, 128), "black": (0, 0, 0), "white": (255, 255, 255), "red": (255, 0, 0)}
+    """Convert word label ('gray', 'black', 'white', ...) to (R, G, B) tuple."""
+    mapping = {
+        "gray": (128, 128, 128),
+        "black": (0, 0, 0),
+        "white": (255, 255, 255),
+        "red": (255, 0, 0),
+        "green": (0, 255, 0),
+        "blue": (0, 0, 255),
+        "yellow": (255, 255, 0),
+        "magenta": (255, 0, 255),
+        "cyan": (0, 255, 255),
+    }
     return mapping.get(word.strip().lower(), (128, 128, 128))
 
 
@@ -1772,6 +1782,103 @@ class ScaleControl:
         return canvas
 
 
+# ─── Multi Image Multi Out ───────────────────────────────────────────────────
+
+class MultiImageMultiOut:
+    """
+    Simple ordered image list → one IMAGE output per image.
+
+    The order of the list is the order of the outputs: the first entry feeds
+    `image_1`, the second `image_2`, and so on (up to MAX_OUTPUTS).
+
+    The frontend adds/removes output sockets to match the list length; the
+    backend always returns exactly one tensor per listed image, in list order.
+
+    resize_mode:
+        fit     → contain (whole image visible), padded with padding_color
+        crop    → cover (fill the canvas), centered crop
+        zoom    → stretch to exactly width × height (aspect ratio ignored)
+        padding → no scaling, centered on the canvas, padded with padding_color
+    """
+
+    MAX_OUTPUTS = 10
+    UPLOADED_FILES_KEY = "image_list"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "width":  ("INT", {"default": 1024, "min": 1, "max": 16384, "step": 1, "display": "number"}),
+                "height": ("INT", {"default": 1024, "min": 1, "max": 16384, "step": 1, "display": "number"}),
+                "resize_mode": (["fit", "crop", "zoom", "padding"], {"default": "fit"}),
+                "padding_color": (["gray", "black", "white", "red", "green", "blue", "yellow", "magenta", "cyan"],
+                                  {"default": "gray"}),
+            },
+            "optional": {
+                # JSON list of filenames, in output order. Managed by the JS extension.
+                "image_list": ("STRING", {"default": "[]"}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",) * MAX_OUTPUTS
+    RETURN_NAMES = tuple(f"image_{i + 1}" for i in range(MAX_OUTPUTS))
+    FUNCTION = "load_images"
+    CATEGORY = "image/loaders"
+    OUTPUT_NODE = False
+
+    @classmethod
+    def IS_CHANGED(cls, width=1024, height=1024, resize_mode="fit", padding_color="gray", image_list="[]"):
+        return hashlib.md5(
+            f"{width}x{height}|{resize_mode}|{padding_color}|{image_list}".encode()
+        ).hexdigest()
+
+    @staticmethod
+    def _resize(img: Image.Image, width: int, height: int, mode: str, bg: tuple) -> Image.Image:
+        if mode == "crop":
+            return _fit_image(img, width, height, "crop", bg)
+        if mode == "zoom":
+            return _fit_image(img, width, height, "fill", bg)
+        if mode == "padding":
+            return _fit_image(img, width, height, "original", bg)
+        return _fit_image(img, width, height, "letterbox", bg)
+
+    def load_images(self, width, height, resize_mode="fit", padding_color="gray", image_list="[]"):
+        width  = max(1, int(width))
+        height = max(1, int(height))
+        bg = _parse_bg_color_word(padding_color)
+
+        try:
+            filenames = json.loads(image_list) if image_list else []
+            if not isinstance(filenames, list):
+                filenames = []
+        except Exception:
+            filenames = []
+        filenames = [f for f in filenames if isinstance(f, str)][: self.MAX_OUTPUTS]
+        print(f"[MultiImageMultiOut] {len(filenames)} image(s): {filenames}")
+
+        input_dir = Path(folder_paths.get_input_directory())
+        tensors = []
+        for name in filenames:
+            fpath = input_dir / name
+            try:
+                with Image.open(fpath) as opened:
+                    img = ImageOps.exif_transpose(opened).convert("RGB")
+            except Exception as e:
+                print(f"[MultiImageMultiOut] Could not read '{name}': {e}")
+                img = Image.new("RGB", (width, height), bg)
+            img = self._resize(img, width, height, resize_mode, bg)
+            arr = np.array(img).astype(np.float32) / 255.0
+            tensors.append(torch.from_numpy(arr).unsqueeze(0))
+
+        if not tensors:
+            # Nothing uploaded yet — still return one valid IMAGE so the node works.
+            blank = Image.new("RGB", (width, height), bg)
+            arr = np.array(blank).astype(np.float32) / 255.0
+            tensors.append(torch.from_numpy(arr).unsqueeze(0))
+
+        return tuple(tensors)
+
+
 # ─── Registrations ────────────────────────────────────────────────────────────
 
 NODE_CLASS_MAPPINGS = {
@@ -1779,6 +1886,7 @@ NODE_CLASS_MAPPINGS = {
     "NeoLoadImagesInGrid": LoadImagesInGrid,
     "NeoGetNativeImageFromList": GetNativeImageFromList,
     "NeoScaleControl": ScaleControl,
+    "NeoMultiImageMultiOut": MultiImageMultiOut,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1786,4 +1894,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "NeoLoadImagesInGrid": "neo - Load Images in Grid (Deprecated) 🖼️",
     "NeoGetNativeImageFromList": "neo - Get Native Image From List",
     "NeoScaleControl": "neo - Scale Control 🔍",
+    "NeoMultiImageMultiOut": "Multi Image Multi Out",
 }
