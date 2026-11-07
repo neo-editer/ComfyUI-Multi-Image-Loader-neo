@@ -1,20 +1,26 @@
 /**
- * Multi Image Multi Out — frontend extension
+ * Multi Image Multi Out / Get Multi Out — frontend extension
  *
- * A plain ordered list (no thumbnails) where the row order IS the output
- * order: row 1 → image_1, row 2 → image_2, … (max 10).
+ * Multi Image Multi Out: a plain ordered list (no thumbnails) where the row
+ * order IS the output order: row 1 → image_1, row 2 → image_2, … (max 10),
+ * plus a trailing `image_list` JSON output.
  *
- * The Python node declares 10 IMAGE outputs; this extension trims the sockets
- * down to the number of uploaded images, so the node grows/shrinks its
- * outputs as you add or remove images.
+ * Socket count = clamp(max(images, fixed_outputs), 0, 10). Slots with no image
+ * are labelled "(empty)" and the backend returns an ExecutionBlocker for them,
+ * so whatever is connected downstream is skipped instead of erroring.
+ *
+ * Get Multi Out: takes that `image_list` JSON output and re-exposes the images
+ * as its own sockets, also driven by fixed_outputs (same blocker behaviour).
  */
 
 import { app } from "../../scripts/app.js";
 
 const NODE_TYPE   = "NeoMultiImageMultiOut";
+const GET_NODE_TYPE = "NeoGetMultiOut";
 const UPLOAD_URL  = "/multi_image_loader/upload";
 const MAX_OUTPUTS = 10;
 const LIST_WIDGET = "image_list";
+const STRING_OUT  = "image_list";
 
 const NODE_HEADER_H  = 30;
 const NODE_SLOT_H    = 22;
@@ -91,19 +97,126 @@ function writeFiles(node, files) {
   if (w) w.value = JSON.stringify(files);
 }
 
-function addOutputSocket(node, name) {
+function addOutputSocket(node, name, type = "IMAGE") {
   node.outputs ||= [];
   try {
-    node.addOutput(name, "IMAGE");
+    node.addOutput(name, type);
   } catch {
-    node.outputs.push({ name, type: "IMAGE", links: null });
+    node.outputs.push({ name, type, links: null });
   }
   // Normalise in case a litegraph build uses (type, name) ordering.
   const slot = node.outputs[node.outputs.length - 1];
   if (slot) {
     slot.name = name;
-    slot.type = "IMAGE";
+    slot.type = type;
     if (slot.links === undefined) slot.links = null;
+  }
+}
+
+function getNumberWidget(node, name, fallback = 0) {
+  const w = node.widgets?.find((ww) => ww.name === name);
+  const n = Number(w?.value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/**
+ * The JSON filename output ("image_list") is always the LAST socket, and the
+ * image sockets live in front of it. That way adding/removing image sockets
+ * never renumbers existing image links — only the (single, obvious) Get link
+ * can move.
+ */
+function ensureImageListOutput(node) {
+  node.outputs ||= [];
+  if (node.outputs[node.outputs.length - 1]?.type === "STRING") return;
+  // Appending never shifts existing slots.
+  addOutputSocket(node, STRING_OUT, "STRING");
+}
+
+/** Fix the JSON output's link origin after an image socket was inserted. */
+function fixStringOutputLinks(node) {
+  const idx = node.outputs.length - 1;
+  const slot = node.outputs[idx];
+  if (slot?.type !== "STRING" || !node.graph) return;
+  for (const id of slot.links || []) {
+    const link = node.graph._links?.get(id);
+    if (link) link.origin_slot = idx;
+  }
+}
+
+/** Insert a new image socket directly before the trailing JSON output. */
+function insertImageSocket(node, name) {
+  const strIdx = node.outputs.length - 1;
+  const slot = { name, type: "IMAGE", links: null };
+  node.outputs.splice(strIdx, 0, slot);
+  node.onOutputAdded?.(slot);
+  fixStringOutputLinks(node);
+  // Links may not be registered yet when this runs during configure.
+  setTimeout(() => fixStringOutputLinks(node), 0);
+  return slot;
+}
+
+/**
+ * Sockets = clamp(max(images, fixed_outputs), 0, 10) image outputs + the
+ * always-present JSON output at the end.
+ */
+function syncOutputs(node, imageCount) {
+  node.outputs ||= [];
+  ensureImageListOutput(node);
+
+  const fixed = Math.max(0, Math.min(MAX_OUTPUTS, getNumberWidget(node, "fixed_outputs")));
+  const want = Math.min(MAX_OUTPUTS, Math.max(imageCount, fixed));
+
+  // Everything except the trailing STRING socket is an image socket.
+  while (node.outputs.length - 1 > want) removeOutputSocket(node, node.outputs.length - 2);
+  while (node.outputs.length - 1 < want) insertImageSocket(node, `image_${node.outputs.length}`);
+
+  node.outputs.forEach((slot, i) => {
+    if (i === node.outputs.length - 1) {
+      slot.name = STRING_OUT;
+      slot.type = "STRING";
+    } else {
+      slot.type = "IMAGE";
+      slot.name = i + 1 <= imageCount ? `image_${i + 1}` : `image_${i + 1} (empty)`;
+    }
+  });
+
+  node.setDirtyCanvas(true, true);
+  app.graph?.setDirtyCanvas(true, true);
+}
+
+/** "Get Multi Out": sockets are driven purely by fixed_outputs. */
+function syncGetOutputs(node) {
+  node.outputs ||= [];
+  const fixed = Math.max(0, Math.min(MAX_OUTPUTS, getNumberWidget(node, "fixed_outputs", 5)));
+
+  while (node.outputs.length > fixed) removeOutputSocket(node, node.outputs.length - 1);
+  while (node.outputs.length < fixed) addOutputSocket(node, `image_${node.outputs.length + 1}`, "IMAGE");
+
+  node.outputs.forEach((slot, i) => {
+    slot.name = `image_${i + 1}`;
+    slot.type = "IMAGE";
+  });
+
+  node.setDirtyCanvas(true, true);
+  app.graph?.setDirtyCanvas(true, true);
+}
+
+/**
+ * Recover the image list if a workflow saved before `fixed_outputs` existed
+ * shifted the positional widgets_values.
+ */
+function repairLegacyWidgets(node, info) {
+  const vals = info?.widgets_values;
+  if (!Array.isArray(vals)) return;
+  const looksLikeList = (v) => typeof v === "string" && v.trim().startsWith("[");
+
+  const fw = node.widgets?.find((w) => w.name === "fixed_outputs");
+  const lw = getListWidget(node);
+
+  if (fw && (looksLikeList(fw.value) || !Number.isFinite(Number(fw.value)))) fw.value = 0;
+  if (lw && !looksLikeList(lw.value)) {
+    const src = vals.find(looksLikeList);
+    if (src) lw.value = src;
   }
 }
 
@@ -120,22 +233,6 @@ function removeOutputSocket(node, index) {
     }
   }
   node.outputs.splice(index, 1);
-}
-
-/** Keep the output sockets in sync with the number of images. */
-function syncOutputs(node, count) {
-  const want = Math.max(0, Math.min(count, MAX_OUTPUTS));
-  node.outputs ||= [];
-
-  while (node.outputs.length > want) removeOutputSocket(node, node.outputs.length - 1);
-  while (node.outputs.length < want) addOutputSocket(node, `image_${node.outputs.length + 1}`);
-  node.outputs.forEach((slot, i) => {
-    slot.name = `image_${i + 1}`;
-    slot.type = "IMAGE";
-  });
-
-  node.setDirtyCanvas(true, true);
-  app.graph?.setDirtyCanvas(true, true);
 }
 
 // ─── list widget ─────────────────────────────────────────────────────────────
@@ -239,7 +336,11 @@ function createListElement(node) {
     foot.replaceChildren();
     const status = document.createElement("span");
     const n = Math.min(files.length, MAX_OUTPUTS);
-    status.textContent = `${files.length} / ${MAX_OUTPUTS} image(s) · ${n} output${n === 1 ? "" : "s"}`;
+    const fixed = Math.max(0, Math.min(MAX_OUTPUTS, getNumberWidget(node, "fixed_outputs")));
+    const shown = Math.max(n, fixed);
+    status.textContent =
+      `${files.length} / ${MAX_OUTPUTS} image(s) · ${shown} output${shown === 1 ? "" : "s"}` +
+      (fixed ? ` (fixed ${fixed})` : "");
     foot.appendChild(status);
 
     if (files.length) {
@@ -373,6 +474,17 @@ app.registerExtension({
         // Re-sync once all widgets exist (safe for older/newer frontends).
         syncOutputs(node, readFiles(node).length);
         el._mimoRefresh?.();
+
+        // Changing fixed_outputs grows/shrinks the socket list live.
+        const fixedWidget = node.widgets?.find((w) => w.name === "fixed_outputs");
+        if (fixedWidget) {
+          const origCb = fixedWidget.callback;
+          fixedWidget.callback = function (...args) {
+            origCb?.apply(this, args);
+            syncOutputs(node, readFiles(node).length);
+            el._mimoRefresh?.();
+          };
+        }
       }, 0);
 
       // New nodes start with the 10 declared sockets → trim to current list.
@@ -402,11 +514,56 @@ app.registerExtension({
 
     // Restore list + sockets when a workflow is loaded.
     const origOnConfigure = nodeType.prototype.onConfigure;
-    nodeType.prototype.onConfigure = function () {
+    nodeType.prototype.onConfigure = function (info) {
       origOnConfigure?.apply(this, arguments);
       const node = this;
+      repairLegacyWidgets(node, info);
       syncOutputs(node, readFiles(node).length);
       node._mimoDom?.element?._mimoRefresh?.();
+    };
+  },
+});
+
+// ─── Get Multi Out ───────────────────────────────────────────────────────────
+
+app.registerExtension({
+  name: "NeoGetMultiOut",
+
+  async beforeRegisterNodeDef(nodeType, nodeData) {
+    if (nodeData.name !== GET_NODE_TYPE) return;
+
+    nodeType.canvasOnly = true;
+
+    const origOnCreated = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function () {
+      origOnCreated?.apply(this, arguments);
+      const node = this;
+
+      if (!node.size || node.size[0] < 240) node.setSize([280, 170]);
+      node.computeSize = function () {
+        return [240, 140];
+      };
+
+      // Trim the 10 declared sockets down to fixed_outputs.
+      syncGetOutputs(node);
+
+      setTimeout(() => {
+        const fixedWidget = node.widgets?.find((w) => w.name === "fixed_outputs");
+        if (fixedWidget) {
+          const origCb = fixedWidget.callback;
+          fixedWidget.callback = function (...args) {
+            origCb?.apply(this, args);
+            syncGetOutputs(node);
+          };
+        }
+        syncGetOutputs(node);
+      }, 0);
+    };
+
+    const origOnConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function () {
+      origOnConfigure?.apply(this, arguments);
+      syncGetOutputs(this);
     };
   },
 });

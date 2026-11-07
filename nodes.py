@@ -10,6 +10,11 @@ from server import PromptServer
 from aiohttp import web
 import folder_paths
 
+try:  # unchanged location in every ComfyUI version we target
+    from comfy_execution.graph import ExecutionBlocker
+except Exception:  # pragma: no cover - defensive for re-arranged internals
+    from comfy_execution.graph_utils import ExecutionBlocker
+
 # ─── Upload route ─────────────────────────────────────────────────────────────
 
 @PromptServer.instance.routes.post("/multi_image_loader/upload")
@@ -1782,6 +1787,54 @@ class ScaleControl:
         return canvas
 
 
+# ─── Shared helpers for the multi-out nodes ──────────────────────────────────
+
+def _resize_multi_out(img: Image.Image, width: int, height: int, mode: str, bg: tuple) -> Image.Image:
+    """Resize one image for the multi-out nodes ('native' keeps the source size)."""
+    if mode == "native":
+        return img
+    if mode == "crop":
+        return _fit_image(img, width, height, "crop", bg)
+    if mode == "zoom":
+        return _fit_image(img, width, height, "fill", bg)
+    if mode == "padding":
+        return _fit_image(img, width, height, "original", bg)
+    return _fit_image(img, width, height, "letterbox", bg)
+
+
+def _load_multi_out_image(input_dir: Path, name: str):
+    """Load one uploaded image as RGB, or None when it can't be read."""
+    try:
+        with Image.open(input_dir / name) as opened:
+            return ImageOps.exif_transpose(opened).convert("RGB")
+    except Exception as e:
+        print(f"[MultiOut] Could not read '{name}': {e}")
+        return None
+
+
+def _parse_filename_list(image_list: str) -> list:
+    try:
+        filenames = json.loads(image_list) if image_list else []
+        if not isinstance(filenames, list):
+            return []
+    except Exception:
+        return []
+    return [f for f in filenames if isinstance(f, str)]
+
+
+def _build_multi_out_outputs(entries, max_outputs: int) -> tuple:
+    """
+    One value per output index. Slots with no image (or an unreadable file)
+    return an ExecutionBlocker so the downstream branch is skipped instead of
+    receiving a bogus/blank image.
+    """
+    outputs = []
+    for i in range(max_outputs):
+        img = entries[i] if i < len(entries) else None
+        outputs.append(ExecutionBlocker(None) if img is None else img)
+    return tuple(outputs)
+
+
 # ─── Multi Image Multi Out ───────────────────────────────────────────────────
 
 class MultiImageMultiOut:
@@ -1791,8 +1844,10 @@ class MultiImageMultiOut:
     The order of the list is the order of the outputs: the first entry feeds
     `image_1`, the second `image_2`, and so on (up to MAX_OUTPUTS).
 
-    The frontend adds/removes output sockets to match the list length; the
-    backend always returns exactly one tensor per listed image, in list order.
+    Outputs: `image_1 .. image_10`, followed by `image_list` (JSON string of the
+    filenames, used by "Get Multi Out"). Indices without an image return an
+    ExecutionBlocker, which silently skips whatever is connected to them.
+    `fixed_outputs` keeps that many sockets alive even with an empty list.
 
     resize_mode:
         fit     → contain (whole image visible), padded with padding_color
@@ -1813,6 +1868,8 @@ class MultiImageMultiOut:
                 "resize_mode": (["fit", "crop", "zoom", "padding"], {"default": "fit"}),
                 "padding_color": (["gray", "black", "white", "red", "green", "blue", "yellow", "magenta", "cyan"],
                                   {"default": "gray"}),
+                # Keep this many output sockets alive even when fewer images are loaded.
+                "fixed_outputs": ("INT", {"default": 0, "min": 0, "max": 10, "step": 1, "display": "number"}),
             },
             "optional": {
                 # JSON list of filenames, in output order. Managed by the JS extension.
@@ -1820,63 +1877,108 @@ class MultiImageMultiOut:
             },
         }
 
-    RETURN_TYPES = ("IMAGE",) * MAX_OUTPUTS
-    RETURN_NAMES = tuple(f"image_{i + 1}" for i in range(MAX_OUTPUTS))
+    # Images first, then the JSON filename list (feeds "Get Multi Out").
+    # Keeping the JSON output LAST means adding/removing image sockets never
+    # changes the image slot indices of an existing graph.
+    RETURN_TYPES = ("IMAGE",) * MAX_OUTPUTS + ("STRING",)
+    RETURN_NAMES = tuple(f"image_{i + 1}" for i in range(MAX_OUTPUTS)) + ("image_list",)
     FUNCTION = "load_images"
     CATEGORY = "image/loaders"
     OUTPUT_NODE = False
 
     @classmethod
-    def IS_CHANGED(cls, width=1024, height=1024, resize_mode="fit", padding_color="gray", image_list="[]"):
+    def IS_CHANGED(cls, fixed_outputs=0, width=1024, height=1024, resize_mode="fit", padding_color="gray", image_list="[]"):
         return hashlib.md5(
-            f"{width}x{height}|{resize_mode}|{padding_color}|{image_list}".encode()
+            f"{fixed_outputs}|{width}x{height}|{resize_mode}|{padding_color}|{image_list}".encode()
         ).hexdigest()
 
-    @staticmethod
-    def _resize(img: Image.Image, width: int, height: int, mode: str, bg: tuple) -> Image.Image:
-        if mode == "crop":
-            return _fit_image(img, width, height, "crop", bg)
-        if mode == "zoom":
-            return _fit_image(img, width, height, "fill", bg)
-        if mode == "padding":
-            return _fit_image(img, width, height, "original", bg)
-        return _fit_image(img, width, height, "letterbox", bg)
-
-    def load_images(self, width, height, resize_mode="fit", padding_color="gray", image_list="[]"):
+    def load_images(self, fixed_outputs=0, width=1024, height=1024, resize_mode="fit", padding_color="gray", image_list="[]"):
         width  = max(1, int(width))
         height = max(1, int(height))
         bg = _parse_bg_color_word(padding_color)
 
-        try:
-            filenames = json.loads(image_list) if image_list else []
-            if not isinstance(filenames, list):
-                filenames = []
-        except Exception:
-            filenames = []
-        filenames = [f for f in filenames if isinstance(f, str)][: self.MAX_OUTPUTS]
+        filenames = _parse_filename_list(image_list)[: self.MAX_OUTPUTS]
         print(f"[MultiImageMultiOut] {len(filenames)} image(s): {filenames}")
 
         input_dir = Path(folder_paths.get_input_directory())
         tensors = []
         for name in filenames:
-            fpath = input_dir / name
-            try:
-                with Image.open(fpath) as opened:
-                    img = ImageOps.exif_transpose(opened).convert("RGB")
-            except Exception as e:
-                print(f"[MultiImageMultiOut] Could not read '{name}': {e}")
-                img = Image.new("RGB", (width, height), bg)
-            img = self._resize(img, width, height, resize_mode, bg)
+            img = _load_multi_out_image(input_dir, name)
+            if img is None:
+                tensors.append(None)
+                continue
+            img = _resize_multi_out(img, width, height, resize_mode, bg)
             arr = np.array(img).astype(np.float32) / 255.0
             tensors.append(torch.from_numpy(arr).unsqueeze(0))
 
-        if not tensors:
-            # Nothing uploaded yet — still return one valid IMAGE so the node works.
-            blank = Image.new("RGB", (width, height), bg)
-            arr = np.array(blank).astype(np.float32) / 255.0
+        return (*_build_multi_out_outputs(tensors, self.MAX_OUTPUTS), json.dumps(filenames))
+
+
+# ─── Get Multi Out ───────────────────────────────────────────────────────────
+
+class GetMultiOut:
+    """
+    Reads the image list published by a Multi Image Multi Out node (connect its
+    `image_list` output here) and exposes those images as separate outputs.
+
+    `fixed_outputs` controls how many output sockets the node shows. Any index
+    with no image returns an ExecutionBlocker, so downstream nodes wired to it
+    are skipped instead of receiving an empty/bogus image.
+    """
+
+    MAX_OUTPUTS = 10
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "fixed_outputs": ("INT", {"default": 5, "min": 0, "max": 10, "step": 1, "display": "number"}),
+                "resize_mode": (["native", "fit", "crop", "zoom", "padding"], {"default": "native"}),
+                "width":  ("INT", {"default": 1024, "min": 1, "max": 16384, "step": 1, "display": "number"}),
+                "height": ("INT", {"default": 1024, "min": 1, "max": 16384, "step": 1, "display": "number"}),
+                "padding_color": (["gray", "black", "white", "red", "green", "blue", "yellow", "magenta", "cyan"],
+                                  {"default": "gray"}),
+            },
+            "optional": {
+                # JSON filename list from a Multi Image Multi Out node.
+                # Unconnected → every output is simply blocked.
+                "image_list": ("STRING", {"forceInput": True}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",) * MAX_OUTPUTS
+    RETURN_NAMES = tuple(f"image_{i + 1}" for i in range(MAX_OUTPUTS))
+    FUNCTION = "get_images"
+    CATEGORY = "image/loaders"
+    OUTPUT_NODE = False
+
+    @classmethod
+    def IS_CHANGED(cls, image_list="[]", fixed_outputs=5, resize_mode="native",
+                   width=1024, height=1024, padding_color="gray"):
+        return hashlib.md5(
+            f"{image_list}|{fixed_outputs}|{width}x{height}|{resize_mode}|{padding_color}".encode()
+        ).hexdigest()
+
+    def get_images(self, image_list="[]", fixed_outputs=5, resize_mode="native",
+                   width=1024, height=1024, padding_color="gray"):
+        width  = max(1, int(width))
+        height = max(1, int(height))
+        bg = _parse_bg_color_word(padding_color)
+
+        filenames = _parse_filename_list(image_list)[: self.MAX_OUTPUTS]
+        input_dir = Path(folder_paths.get_input_directory())
+
+        tensors = []
+        for name in filenames:
+            img = _load_multi_out_image(input_dir, name)
+            if img is None:
+                tensors.append(None)
+                continue
+            img = _resize_multi_out(img, width, height, resize_mode, bg)
+            arr = np.array(img).astype(np.float32) / 255.0
             tensors.append(torch.from_numpy(arr).unsqueeze(0))
 
-        return tuple(tensors)
+        return _build_multi_out_outputs(tensors, self.MAX_OUTPUTS)
 
 
 # ─── Registrations ────────────────────────────────────────────────────────────
@@ -1887,6 +1989,7 @@ NODE_CLASS_MAPPINGS = {
     "NeoGetNativeImageFromList": GetNativeImageFromList,
     "NeoScaleControl": ScaleControl,
     "NeoMultiImageMultiOut": MultiImageMultiOut,
+    "NeoGetMultiOut": GetMultiOut,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1895,4 +1998,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "NeoGetNativeImageFromList": "neo - Get Native Image From List",
     "NeoScaleControl": "neo - Scale Control 🔍",
     "NeoMultiImageMultiOut": "Multi Image Multi Out",
+    "NeoGetMultiOut": "Get Multi Out",
 }
