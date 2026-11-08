@@ -23,6 +23,10 @@ const MAX_OUTPUTS = 10;
 const LIST_WIDGET = "image_list";
 const IMAGES_OUT  = "images";
 
+// Saved image groups live in localStorage: [{ name, files: [..], ts }]
+const GROUPS_KEY = "mimo_groups_v1";
+const MAX_GROUPS = 50;
+
 const NODE_HEADER_H  = 30;
 const NODE_SLOT_H    = 22;
 const NODE_PADDING_V = 12;
@@ -45,6 +49,14 @@ function injectStyles() {
     .mimo-list{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;
       gap:3px;min-height:48px}
     .mimo-empty{color:#6f6f6f;font-size:11px;text-align:center;padding:10px 4px;line-height:1.4}
+    .mimo-groups{display:flex;gap:4px;align-items:center;flex:0 0 auto}
+    .mimo-select{flex:1 1 auto;min-width:0;font-size:10px;padding:1px 2px;background:#2c2c2c;
+      color:#cfcfcf;border:1px solid #444;border-radius:3px;outline:none}
+    .mimo-select:disabled{opacity:.5}
+    .mimo-gbtn{flex:0 0 auto;font-size:10px;padding:1px 5px;border:1px solid #444;border-radius:3px;
+      background:#2c2c2c;color:#9a9a9a;cursor:pointer;white-space:nowrap}
+    .mimo-gbtn:hover:not(:disabled){background:#3a3a3a;color:#fff}
+    .mimo-gbtn:disabled{opacity:.35;cursor:default}
     .mimo-row{display:flex;align-items:center;gap:6px;background:#2a2a2a;border:1px solid #333;
       border-radius:4px;padding:3px 5px}
     .mimo-idx{flex:0 0 auto;width:22px;height:18px;display:flex;align-items:center;justify-content:center;
@@ -96,6 +108,43 @@ function readFiles(node) {
 function writeFiles(node, files) {
   const w = getListWidget(node);
   if (w) w.value = JSON.stringify(files);
+}
+
+// ─── saved groups (localStorage) ─────────────────────────────────────────────
+
+function readGroups() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(GROUPS_KEY) || "[]");
+    if (!Array.isArray(raw)) return [];
+    return raw.filter(
+      (g) => g && typeof g.name === "string" && Array.isArray(g.files) &&
+             g.files.every((f) => typeof f === "string")
+    );
+  } catch {
+    return [];
+  }
+}
+
+function writeGroups(groups) {
+  try {
+    localStorage.setItem(GROUPS_KEY, JSON.stringify(groups.slice(0, MAX_GROUPS)));
+  } catch (err) {
+    console.warn("[MIMO] could not save groups:", err);
+  }
+}
+
+/** Group name = first image's filename, without the upload hash prefix / extension. */
+function groupNameFor(files) {
+  const first = (files[0] || "group").split("/").pop();
+  const base = first.replace(/\.[^.]+$/, "");
+  return base.replace(/^mil_[0-9a-f]{8}_/i, "") || "group";
+}
+
+function uniqueGroupName(groups, base) {
+  let name = base;
+  let n = 2;
+  while (groups.some((g) => g.name === name)) name = `${base} (${n++})`;
+  return name;
 }
 
 function addOutputSocket(node, name, type = "IMAGE") {
@@ -266,6 +315,29 @@ function createListElement(node) {
   drop.className = "mimo-drop";
   drop.textContent = DROP_TEXT;
 
+  // Saved-group picker: [ select ] [💾 Save] [🗑]
+  const groupsBar = document.createElement("div");
+  groupsBar.className = "mimo-groups";
+
+  const groupSelect = document.createElement("select");
+  groupSelect.className = "mimo-select";
+  groupSelect.title = "Restore a saved group of images";
+
+  const saveGroupBtn = document.createElement("button");
+  saveGroupBtn.className = "mimo-gbtn";
+  saveGroupBtn.type = "button";
+  saveGroupBtn.textContent = "💾 Save";
+  saveGroupBtn.title = "Save the current list as a reusable group";
+
+  const deleteGroupBtn = document.createElement("button");
+  deleteGroupBtn.className = "mimo-gbtn";
+  deleteGroupBtn.type = "button";
+  deleteGroupBtn.textContent = "🗑";
+  deleteGroupBtn.title = "Delete the selected saved group";
+  deleteGroupBtn.disabled = true;
+
+  groupsBar.append(groupSelect, saveGroupBtn, deleteGroupBtn);
+
   const list = document.createElement("div");
   list.className = "mimo-list";
 
@@ -278,7 +350,7 @@ function createListElement(node) {
   fileInput.accept = "image/*";
   fileInput.style.display = "none";
 
-  root.append(drop, list, foot, fileInput);
+  root.append(drop, groupsBar, list, foot, fileInput);
 
   // Don't let the canvas hijack scrolling / pointer events inside the list.
   root.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
@@ -287,6 +359,72 @@ function createListElement(node) {
     writeFiles(node, files);
     syncOutputs(node, files.length);
     render();
+
+    // Keep the dropdown honest: clear it when the list no longer matches it.
+    const selected = groupSelect.value;
+    if (selected) {
+      const group = readGroups().find((g) => g.name === selected);
+      if (!group || group.files.slice(0, MAX_OUTPUTS).join("|") !== files.join("|")) {
+        groupSelect.value = "";
+        deleteGroupBtn.disabled = true;
+      }
+    }
+  }
+
+  let flashTimer = null;
+  function flashStatus(text, ms = 1700) {
+    clearTimeout(flashTimer);
+    drop.textContent = text;
+    flashTimer = setTimeout(() => (drop.textContent = DROP_TEXT), ms);
+  }
+
+  function refreshGroups(selected = "") {
+    const groups = readGroups();
+    groupSelect.replaceChildren(new Option("— saved groups —", ""));
+    for (const g of groups) {
+      groupSelect.appendChild(new Option(`${g.name} (${g.files.length})`, g.name));
+    }
+    groupSelect.value = groups.some((g) => g.name === selected) ? selected : "";
+    deleteGroupBtn.disabled = !groupSelect.value;
+  }
+
+  function saveCurrentGroup() {
+    const files = readFiles(node).slice(0, MAX_OUTPUTS);
+    if (!files.length) {
+      flashStatus("Nothing to save — add images first");
+      return;
+    }
+
+    const groups = readGroups();
+    const key = files.join("|");
+    const duplicate = groups.find((g) => g.files.slice(0, MAX_OUTPUTS).join("|") === key);
+    if (duplicate) {
+      flashStatus(`Already saved as "${duplicate.name}"`);
+      return;
+    }
+
+    const name = uniqueGroupName(groups, groupNameFor(files));
+    groups.unshift({ name, files, ts: Date.now() });
+    writeGroups(groups);
+    refreshGroups(name);
+    flashStatus(`Saved "${name}"`);
+  }
+
+  function applyGroup(name) {
+    const group = readGroups().find((g) => g.name === name);
+    if (!group) {
+      refreshGroups();
+      return;
+    }
+    const files = group.files.slice(0, MAX_OUTPUTS);
+    commit(files);
+    flashStatus(`Loaded "${group.name}" (${files.length} image(s))`);
+  }
+
+  function removeGroup(name) {
+    writeGroups(readGroups().filter((g) => g.name !== name));
+    refreshGroups();
+    flashStatus(`Deleted "${name}"`);
   }
 
   function move(index, delta) {
@@ -414,6 +552,28 @@ function createListElement(node) {
 
   root._mimoRefresh = render;
   root._mimoAddFiles = addFiles;
+
+  // Saved-group controls
+  groupSelect.addEventListener("pointerdown", (e) => e.stopPropagation());
+  groupSelect.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
+  groupSelect.addEventListener("change", () => {
+    deleteGroupBtn.disabled = !groupSelect.value;
+    if (groupSelect.value) applyGroup(groupSelect.value);
+  });
+  saveGroupBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+  saveGroupBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    saveCurrentGroup();
+  });
+  deleteGroupBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+  deleteGroupBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (groupSelect.value) removeGroup(groupSelect.value);
+  });
+
+  refreshGroups();
   render();
   return root;
 }

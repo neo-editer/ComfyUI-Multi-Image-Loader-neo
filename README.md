@@ -9,8 +9,9 @@
 *   **Interactive Drag & Drop**: Upload multiple images directly into the node widget from your local machine.
 *   **No Folder Required**: Bypasses the need for pre-defined input folders; images are handled via a dedicated internal upload route.
 *   **Unified Batch Tensor**: Automatically combines all uploaded images into a single `IMAGE` batch tensor `[B, H, W, C]`.
-*   **Smart Resizing**: Includes a `resize_to_first` mode to automatically harmonize inconsistent image dimensions based on the first loaded file.
+*   **Keep Proportion Fit**: The `keep_proportion` widget harmonizes inconsistent image dimensions with `stretch`, `resize`, `pad`, `crop` or `original`, plus a `crop_position` anchor (`center`, `top`, `bottom`, `left`, `right`).
 *   **Persistent Storage**: The list of uploaded images is saved directly in your ComfyUI workflow JSON for easy multi-session work.
+*   **Saved Image Groups**: The *Multi Image Multi Out* node can save the current image list as a reusable group (`💾 Save`) and restore or delete it later from the dropdown.
 *   **Visual Previews**: (Coming Soon/Frontend) Interactive thumbnail previews for managed assets.
 
 ---
@@ -22,6 +23,32 @@
 3.  **`neo - Get Native Image From List`**: picks one image out of the native (per-image original size) list output.
 4.  **`neo - Scale Control`**, **`neo - From Batch to Grid`**: downstream helpers.
 5.  **JavaScript Extension**: injects the custom drag-and-drop / file-picker widget into the ComfyUI graph.
+
+### ✂️ Keep proportion (`keep_proportion`)
+
+Controls how each source image is conformed to the shared output canvas.
+
+| Value | Behaviour |
+|---|---|
+| `stretch` | Force the target size, distorting the aspect ratio |
+| `resize` | Scale proportionally to fit inside the canvas |
+| `pad` | Scale proportionally, then fill the leftover area with `bg_color` (default) |
+| `crop` | Crop the source to the canvas aspect ratio **first**, then scale — no background bars |
+| `original` | Keep native pixels, centred on the canvas |
+
+`crop_position` anchors the `crop` step: `center`, `top`, `bottom`, `left`, `right`.
+Legacy workflow values (`letterbox`, `fill`) are migrated automatically.
+
+### 💾 Saved image groups (Multi Image Multi Out)
+
+The *Multi Image Multi Out* node keeps a reusable library of image lists:
+
+*   **💾 Save** — stores the current list under the first image's name (deduplicated, up to 50 groups).
+*   **Dropdown** — restores a saved group, replacing the node's current list.
+*   **🗑** — deletes the selected group.
+
+Groups live in browser `localStorage` (`mimo_groups_v1`), so they are per-machine and
+independent of the workflow JSON.
 
 ### 🎬 Multi Media Loader — video options
 
