@@ -1,2 +1,48 @@
+# ── Agent tooling ────────────────────────────────────────────────────────────
 .agent/
 .opencode
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyd
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# ── Editors / OS ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# ── Node ─────────────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+
+# ── ComfyUI runtime data ─────────────────────────────────────────────────────
+ComfyUI/
+input/
+output/
+temp/
+user/
+
+# ── Local scratch notes / diffs (not part of the extension) ──────────────────
+*.log
+tmp_*.txt
+tmp_out.txt
+diff*.txt
+*_diff.txt
+*_diff.patch
+diff_between_nodes.patch
+history*.txt
+web/_pixel_tools_block.txt
