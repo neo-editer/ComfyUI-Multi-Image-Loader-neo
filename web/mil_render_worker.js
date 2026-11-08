@@ -15,6 +15,31 @@
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
+function normalizeFitMode(value) {
+  const v = String(value ?? "pad").trim().toLowerCase().replace(/[-_ ]+/g, "_");
+  const map = {
+    stretch: "stretch",
+    fill: "stretch",
+    resize: "pad",
+    pad: "pad",
+    letterbox: "pad",
+    keep_proportion: "crop",
+    crop: "crop",
+    original: "original",
+  };
+  return map[v] ?? "pad";
+}
+
+/** Anchor factors (0..1) for keep_proportion cropping. */
+function cropAnchorFactors(value) {
+  const p = String(value ?? "center").trim().toLowerCase().replace(/[-_ ]+/g, "_");
+  if (p === "left") return [0, 0.5];
+  if (p === "right") return [1, 0.5];
+  if (p === "top") return [0.5, 0];
+  if (p === "bottom") return [0.5, 1];
+  return [0.5, 0.5];
+}
+
 /**
  * Draw lasso ops onto a sub-canvas and composite the bg-fill cutout
  * back onto the main context. All coordinates are normalised [0..1].
@@ -87,6 +112,7 @@ self.addEventListener("message", async (event) => {
 
 async function handleCropTransform(bitmap, p) {
   const { refW, refH, bgColor, fitMode } = p;
+  const mode = normalizeFitMode(fitMode);
   const t = p.transform;
 
   const cvs = new OffscreenCanvas(refW, refH);
@@ -98,10 +124,23 @@ async function handleCropTransform(bitmap, p) {
 
   // Source crop region
   const hasCR = t.cx != null && (t.cx > 0 || t.cy > 0 || t.cw < 1 || t.ch < 1);
-  const srcX = hasCR ? t.cx * bitmap.width : 0;
-  const srcY = hasCR ? t.cy * bitmap.height : 0;
-  const srcW = hasCR ? t.cw * bitmap.width : bitmap.width;
-  const srcH = hasCR ? t.ch * bitmap.height : bitmap.height;
+  let srcX = hasCR ? t.cx * bitmap.width : 0;
+  let srcY = hasCR ? t.cy * bitmap.height : 0;
+  let srcW = hasCR ? t.cw * bitmap.width : bitmap.width;
+  let srcH = hasCR ? t.ch * bitmap.height : bitmap.height;
+
+  // ── ASPECT CROP: keep_proportion crops the SOURCE before any scaling ──
+  if (mode === "crop") {
+    const targetAR = refW / refH, srcAR = srcW / srcH;
+    let cw = srcW, ch = srcH;
+    if (srcAR > targetAR) cw = srcH * targetAR;
+    else ch = srcW / targetAR;
+    const [ax, ay] = cropAnchorFactors(p.cropPosition);
+    srcX += (srcW - cw) * ax;
+    srcY += (srcH - ch) * ay;
+    srcW = Math.max(1, cw);
+    srcH = Math.max(1, ch);
+  }
 
   // Transform parameters
   const ox = t.ox ?? 0, oy = t.oy ?? 0, sc = t.scale ?? 1;
@@ -115,7 +154,7 @@ async function handleCropTransform(bitmap, p) {
 
   // Base fit scale (letterbox vs crop mode)
   const globalScale = p.globalScale ?? 1.0;
-  const bf = fitMode === "crop"
+  const bf = mode === "crop"
     ? Math.max(refW / rW, refH / rH)
     : Math.min(refW / rW, refH / rH);
   const eff = bf * sc;
@@ -167,8 +206,9 @@ async function handleCropTransform(bitmap, p) {
 
 async function handleFitPreview(bitmap, p) {
   const { targetW, targetH, mode, bgColor } = p;
+  const normalizedMode = normalizeFitMode(mode);
 
-  if (mode === "original") {
+  if (normalizedMode === "original") {
     const cvs = new OffscreenCanvas(bitmap.width, bitmap.height);
     const ctx = cvs.getContext("2d");
     ctx.clearRect(0, 0, bitmap.width, bitmap.height);
@@ -201,18 +241,37 @@ async function handleFitPreview(bitmap, p) {
     ctx.clip();
   }
 
-  const baseScale = mode === "letterbox" 
-    ? Math.min(targetW / bitmap.width, targetH / bitmap.height)
-    : Math.max(targetW / bitmap.width, targetH / bitmap.height);
-  
+  if (normalizedMode === "stretch") {
+    ctx.drawImage(bitmap, 0, 0, targetW, targetH);
+    ctx.restore();
+    return await canvasToDataUrl(cvs);
+  }
+
+  if (normalizedMode === "crop") {
+    // Crop the source to the target aspect ratio FIRST, then scale to fit.
+    const targetAR = targetW / targetH, srcAR = bitmap.width / bitmap.height;
+    let sw = bitmap.width, sh = bitmap.height;
+    if (srcAR > targetAR) sw = sh * targetAR;
+    else sh = sw / targetAR;
+    const [ax, ay] = cropAnchorFactors(p.cropPosition);
+    const sx = (bitmap.width - sw) * ax, sy = (bitmap.height - sh) * ay;
+    ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, targetW, targetH);
+    ctx.restore();
+    return await canvasToDataUrl(cvs);
+  }
+
+  const baseScale = Math.min(targetW / bitmap.width, targetH / bitmap.height);
   const dw = bitmap.width * baseScale, dh = bitmap.height * baseScale;
   const dx = (targetW - dw) / 2, dy = (targetH - dh) / 2;
-  
+
   ctx.drawImage(bitmap, dx, dy, dw, dh);
 
   ctx.restore();
 
-  // Convert to data URL via blob
+  return await canvasToDataUrl(cvs);
+}
+
+async function canvasToDataUrl(cvs) {
   try {
     const blob = await cvs.convertToBlob({ type: "image/jpeg", quality: 0.92 });
     const arrayBuf = await blob.arrayBuffer();
@@ -221,7 +280,7 @@ async function handleFitPreview(bitmap, p) {
     for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
     return "data:image/jpeg;base64," + btoa(binary);
   } catch (e) {
-    console.warn("[MIL Worker] convertToBlob failed inside handleFitPreview:", e);
+    console.warn("[MIL Worker] convertToBlob failed:", e);
     return "";
   }
 }

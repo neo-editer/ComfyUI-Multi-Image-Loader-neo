@@ -1251,7 +1251,42 @@ function createWidget(node) {
   }
 
   function getFitModeWidget() {
-    return node.widgets?.find((w) => w.name === "fit_mode");
+    // `keep_proportion` is the current widget name; `fit_mode` is the legacy one.
+    return node.widgets?.find((w) => w.name === "keep_proportion")
+        || node.widgets?.find((w) => w.name === "fit_mode");
+  }
+
+  function normalizeFitMode(value) {
+    const v = String(value ?? "pad").trim().toLowerCase().replace(/[-_ ]+/g, "_");
+    const map = {
+      stretch: "stretch",
+      fill: "stretch",
+      resize: "pad",
+      pad: "pad",
+      letterbox: "pad",
+      keep_proportion: "crop",
+      crop: "crop",
+      original: "original",
+    };
+    return map[v] ?? "pad";
+  }
+
+  function getCropPositionWidget() {
+    return node.widgets?.find((w) => w.name === "crop_position");
+  }
+
+  /** Anchor factors (0..1) for keep_proportion cropping. */
+  function cropAnchorFactors(value) {
+    const p = String(value ?? "center").trim().toLowerCase().replace(/[-_ ]+/g, "_");
+    if (p === "left") return [0, 0.5];
+    if (p === "right") return [1, 0.5];
+    if (p === "top") return [0.5, 0];
+    if (p === "bottom") return [0.5, 1];
+    return [0.5, 0.5];
+  }
+
+  function getCropAnchor() {
+    return cropAnchorFactors(getCropPositionWidget()?.value ?? "center");
   }
 
   function getBgColorWidget() {
@@ -2589,7 +2624,7 @@ function createWidget(node) {
 
       // Solid-fill crop path — crop region is a PRE-step on the source
       const el = await loadImage(item.src);
-      const mode = getFitModeWidget()?.value ?? "letterbox";
+      const mode = normalizeFitMode(getFitModeWidget()?.value ?? "pad");
       // If pixel edits exist, load the edited image (crop already baked in)
       let drawSrc = el, srcX, srcY, srcW, srcH;
       const _editsSrc2 = _resolveEditsSrc(t);
@@ -2610,12 +2645,24 @@ function createWidget(node) {
       const ctx = cvs.getContext("2d");
       const bgC = /^#[0-9a-fA-F]{6}$/.test(bgRaw) ? bgRaw : getEffectiveBgColor();
       ctx.fillStyle = bgC; ctx.fillRect(0, 0, refW, refH);
+      // ── ASPECT CROP: keep_proportion crops the SOURCE before any scaling ──
+      if (mode === "crop") {
+        const targetAR = refW / refH, srcAR = srcW / srcH;
+        let cw = srcW, ch = srcH;
+        if (srcAR > targetAR) cw = srcH * targetAR;
+        else ch = srcW / targetAR;
+        const [ax, ay] = getCropAnchor();
+        srcX += (srcW - cw) * ax;
+        srcY += (srcH - ch) * ay;
+        srcW = Math.max(1, cw);
+        srcH = Math.max(1, ch);
+      }
       const ox = t.ox ?? 0, oy = t.oy ?? 0, sc = t.scale ?? 1;
       const fH = !!(t.flipH), fV = !!(t.flipV), rot = (t.rotate || 0) * Math.PI / 180;
       const cosA = Math.abs(Math.cos(rot)), sinA = Math.abs(Math.sin(rot));
       const rW = srcW * cosA + srcH * sinA;
       const rH = srcW * sinA + srcH * cosA;
-      // respect fit_mode for base scale
+      // respect keep_proportion for base scale
       const bf = mode === "crop"
         ? Math.max(refW / rW, refH / rH)
         : Math.min(refW / rW, refH / rH);
@@ -2655,7 +2702,7 @@ function createWidget(node) {
     }
 
     // No crop transform — apply letterbox/crop fit vs reference dims
-    const mode = getFitModeWidget()?.value ?? "letterbox";
+    const mode = normalizeFitMode(getFitModeWidget()?.value ?? "pad");
     if (mode === "original") {
       return item.src;
     }
@@ -2664,16 +2711,19 @@ function createWidget(node) {
     cvs.width = refW; cvs.height = refH;
     const ctx = cvs.getContext("2d");
 
-    if (mode === "letterbox") {
+    if (mode === "pad") {
       ctx.fillStyle = getEffectiveBgColor();  // node bg_color (no per-image override for non-crop items)
       ctx.fillRect(0, 0, refW, refH);
       const scale = Math.min(refW / el.naturalWidth, refH / el.naturalHeight);
       const dw = el.naturalWidth * scale, dh = el.naturalHeight * scale;
       ctx.drawImage(el, (refW - dw) / 2, (refH - dh) / 2, dw, dh);
-    } else { // crop
-      const scale = Math.max(refW / el.naturalWidth, refH / el.naturalHeight);
-      const sw = refW / scale, sh = refH / scale;
-      const sx = (el.naturalWidth - sw) / 2, sy = (el.naturalHeight - sh) / 2;
+    } else { // crop / keep_proportion — crop the source first, then scale
+      const targetAR = refW / refH, srcAR = el.naturalWidth / el.naturalHeight;
+      let sw = el.naturalWidth, sh = el.naturalHeight;
+      if (srcAR > targetAR) sw = sh * targetAR;
+      else sh = sw / targetAR;
+      const [ax, ay] = getCropAnchor();
+      const sx = (el.naturalWidth - sw) * ax, sy = (el.naturalHeight - sh) * ay;
       ctx.drawImage(el, sx, sy, sw, sh, 0, 0, refW, refH);
     }
     return cvs.toDataURL("image/png");
@@ -2698,7 +2748,7 @@ function createWidget(node) {
   async function renderFitPreviews() {
     if (items.length < 1) return;
 
-    const mode = getFitModeWidget()?.value ?? "letterbox";
+    const mode = normalizeFitMode(getFitModeWidget()?.value ?? "pad");
     const ar = getAspectRatioWidget()?.value ?? "Starred image";
 
     if (mode === "original") {
@@ -2708,10 +2758,6 @@ function createWidget(node) {
       previewActive = true;
       render();
       return;
-    }
-
-    if (mode === "original") {
-      return item.src;
     }
 
     try {
@@ -2731,7 +2777,7 @@ function createWidget(node) {
         const globalScale = 1.0;
         jobs.push(
           workerRender("fitPreview", items[i].src, {
-            targetW, targetH, mode, bgColor, globalScale
+            targetW, targetH, mode, bgColor, globalScale, cropPosition: getCropPositionWidget()?.value ?? "center"
           }).then(dataUrl => { items[i].previewSrc = dataUrl; })
             .catch(e => console.warn(`[MIL] Fit preview failed for ${items[i].filename}:`, e))
         );
@@ -2752,7 +2798,7 @@ function createWidget(node) {
   async function renderCropPreviews() {
     if (items.length < 1) return;
     const { refW, refH } = await computeRefDims();
-    const mode = getFitModeWidget()?.value ?? "letterbox";
+    const mode = normalizeFitMode(getFitModeWidget()?.value ?? "pad");
 
     const jobs = [];
     for (let i = 0; i < items.length; i++) {
@@ -2769,7 +2815,10 @@ function createWidget(node) {
           fetch("/multi_image_loader/preview", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({filename: item.filename, transform: t, refW, refH, globalScale})
+            body: JSON.stringify({
+              filename: item.filename, transform: t, refW, refH, globalScale,
+              fitMode: mode, cropPosition: getCropPositionWidget()?.value ?? "center",
+            })
           }).then(async resp => {
             if (resp.ok) {
               const { dataUrl } = await resp.json();
@@ -2786,7 +2835,8 @@ function createWidget(node) {
           : t;
         jobs.push(
           workerRender("cropTransform", imgSrc, {
-            refW, refH, bgColor: bgC, fitMode: mode, transform: xform, globalScale
+            refW, refH, bgColor: bgC, fitMode: mode, transform: xform, globalScale,
+            cropPosition: getCropPositionWidget()?.value ?? "center"
           }).then(dataUrl => { item.previewSrc = dataUrl; })
             .catch(e => console.warn(`[MIL] crop preview error: ${item.filename}`, e))
         );
@@ -3669,7 +3719,7 @@ function createWidget(node) {
         const cosA  = Math.abs(Math.cos(rot)), sinA = Math.abs(Math.sin(rot));
         const rW    = eW * cosA + eH * sinA;
         const rH    = eW * sinA + eH * cosA;
-        const fitMode = getFitModeWidget()?.value ?? "letterbox";
+        const fitMode = normalizeFitMode(getFitModeWidget()?.value ?? "pad");
         const bf    = fitMode === "crop"
           ? Math.max(wpX / rW, wpY / rH)
           : Math.min(wpX / rW, wpY / rH);
@@ -4421,9 +4471,9 @@ function createWidget(node) {
 
     secEdit.appendChild(mkSec("Quick Fit", () => {
       doFit();
-    }, "Reset to Letterbox"));
+    }, "Reset to Fit"));
     secEdit.appendChild(mkPB("\u2B1B Fill  (cover)",  doFill));
-    secEdit.appendChild(mkPB("\u2B1C Fit   (letterbox)", doFit));
+    secEdit.appendChild(mkPB("\u2B1C Fit   (pad)", doFit));
     secEdit.appendChild(mkPB("\u2194 Fit Width",  doFitW));
     secEdit.appendChild(mkPB("\u2195 Fit Height", doFitH));
     secEdit.appendChild(mkSec("Flip", () => {
@@ -6320,7 +6370,7 @@ function createWidget(node) {
       return { rW: w*c+h*s, rH: w*s+h*c };
     }
     function _bfitOf(rW, rH) {
-      const fm = getFitModeWidget()?.value ?? "letterbox";
+      const fm = normalizeFitMode(getFitModeWidget()?.value ?? "pad");
       return fm === "crop" ? Math.max(frameW/rW, frameH/rH) : Math.min(frameW/rW, frameH/rH);
     }
     // ── Lasso bounding-box (normalized 0..1) ──
@@ -6482,8 +6532,9 @@ function createWidget(node) {
         }
       }
 
-      const fitMode = getFitModeWidget()?.value ?? "letterbox";
-      const cacheKey = JSON.stringify(transform) + "|" + fn + "|" + fitMode;
+      const fitMode = normalizeFitMode(getFitModeWidget()?.value ?? "pad");
+      const cropPosition = getCropPositionWidget()?.value ?? "center";
+      const cacheKey = JSON.stringify(transform) + "|" + fn + "|" + fitMode + "|" + cropPosition;
       edReqHandle = setTimeout(async () => {
         if (!edImg || !fn) return;
         const cached = edPreviewCache.get(cacheKey);
@@ -6493,7 +6544,7 @@ function createWidget(node) {
           const resp = await fetch("/multi_image_loader/preview", {
             method: "POST",
             headers: {"Content-Type":"application/json"},
-            body: JSON.stringify({filename: fn, transform, refW:edRefW, refH:edRefH, fitMode})
+            body: JSON.stringify({filename: fn, transform, refW:edRefW, refH:edRefH, fitMode, cropPosition})
           });
           if (!resp.ok) throw new Error(`${resp.status}: ${await resp.text()}`);
           const { dataUrl } = await resp.json();
@@ -6529,7 +6580,7 @@ function createWidget(node) {
       const eW = effNatW(), eH = effNatH();
       const rf=edRotate*Math.PI/180, c=Math.abs(Math.cos(rf)), s=Math.abs(Math.sin(rf));
       const rW=eW*c+eH*s, rH=eW*s+eH*c;
-      const edFitMode = getFitModeWidget()?.value ?? "letterbox";
+      const edFitMode = normalizeFitMode(getFitModeWidget()?.value ?? "pad");
       bFit = edFitMode === "crop"
         ? Math.max(frameW/rW, frameH/rH)
         : Math.min(frameW/rW, frameH/rH);
@@ -9658,8 +9709,8 @@ app.registerExtension({
             node._milDomWidget?.element?._renderWithResize?.();
           };
         }
-        // Auto-preview when aspect_ratio, fit_mode, megapixels, bg_color, or scale change
-        const autoPreviewWidgets = ["aspect_ratio", "fit_mode", "megapixels", "bg_color", "scale"];
+        // Auto-preview when aspect_ratio, keep_proportion, crop_position, megapixels, bg_color, or scale change
+        const autoPreviewWidgets = ["aspect_ratio", "keep_proportion", "fit_mode", "crop_position", "megapixels", "bg_color", "scale"];
         autoPreviewWidgets.forEach(wName => {
           const w = node.widgets?.find(ww => ww.name === wName);
           if (w) {
@@ -9825,7 +9876,7 @@ app.registerExtension({
       // every subsequent widget to receive the NEXT widget's value.
       //
       // We detect this by checking the original serialized array: if sv[0]
-      // is a valid fit_mode option (not a JSON array), the shift happened.
+      // is a valid keep_proportion option (not a JSON array), the shift happened.
       // We then RE-APPLY the correct values directly by widget name.
       try {
         const sv = data?.widgets_values;
@@ -9833,22 +9884,40 @@ app.registerExtension({
         console.log(`[MIL:${node.id}] onConfigure: widget names =`, node.widgets?.map(w => w.name));
         console.log(`[MIL:${node.id}] onConfigure: widget values =`, node.widgets?.map(w => ({name: w.name, value: typeof w.value === 'string' && w.value.length > 80 ? w.value.substring(0,80) + '...' : w.value})));
         if (sv && node.widgets) {
-          const fmW = node.widgets.find(w => w.name === "fit_mode");
-          const fmOpts = fmW?.options?.values || ["letterbox", "crop"];
+          const fmW = node.widgets.find(w => w.name === "keep_proportion") || node.widgets.find(w => w.name === "fit_mode");
+          const legacyFitOpts = ["letterbox", "fill", "keep_proportion"];
+          const fmOpts = [...(fmW?.options?.values || ["stretch", "resize", "pad", "crop", "original"]), ...legacyFitOpts];
 
           if (fmOpts.includes(sv[0])) {
-            // Shift confirmed: sv starts at fit_mode, image_list was excluded.
+            // Shift confirmed: sv starts at keep_proportion, image_list was excluded.
             // Map serialized values to widget names (excluding image_list).
-            const nameOrder = [
-              "fit_mode", "bg_color", "aspect_ratio", "megapixels",
-              "thumb_size", "double_click", "crop_data", "selected_items",
-              "reference_image", "grid_columns", "grid_rows", "randomize"
-            ];
+            //
+            // Two layouts exist:
+            //   new: [... keep_proportion, crop_position, bg_color, ...]
+            //   old: [... keep_proportion, bg_color, ...]        (saved before
+            //        crop_position was introduced)
+            // Detect the old one by checking whether sv[1] is a crop position.
+            const cropPosOpts = ["center", "top", "bottom", "left", "right"];
+            const isNewLayout = sv.length > 1 && cropPosOpts.includes(String(sv[1]).toLowerCase());
+            const nameOrder = isNewLayout
+              ? [
+                  "keep_proportion", "crop_position", "bg_color", "aspect_ratio", "megapixels",
+                  "thumb_size", "double_click", "crop_data", "selected_items",
+                  "reference_image", "grid_columns", "grid_rows", "randomize"
+                ]
+              : [
+                  "keep_proportion", "bg_color", "aspect_ratio", "megapixels",
+                  "thumb_size", "double_click", "crop_data", "selected_items",
+                  "reference_image", "grid_columns", "grid_rows", "randomize"
+                ];
 
+            const mapped = {};
             for (let i = 0; i < nameOrder.length && i < sv.length; i++) {
+              mapped[nameOrder[i]] = sv[i];
               const w = node.widgets.find(ww => ww.name === nameOrder[i]);
               if (w) w.value = sv[i];
             }
+            console.log(`[MIL:${node.id}] onConfigure: layout=${isNewLayout ? "new" : "legacy"} (no crop_position in save)`);
 
             // Restore image_list from localStorage backup — but ONLY if it
             // belongs to the SAME workflow.  When the user drags a PNG to load
@@ -9871,22 +9940,21 @@ app.registerExtension({
                   console.log(`[MIL:${node.id}] onConfigure: localStorage backup has ${bkFiles.length} image(s)`);
 
                   // Collect ALL filenames from the serialized workflow data.
-                  // nameOrder: sv[6]=crop_data, sv[7]=selected_items, sv[8]=reference_image
                   const wfFilenames = new Set();
                   try {
-                    const cdRaw = sv[6];
+                    const cdRaw = mapped.crop_data;
                     if (cdRaw && cdRaw !== "{}") {
                       for (const k of Object.keys(JSON.parse(cdRaw))) wfFilenames.add(k);
                     }
                   } catch(_) {}
                   try {
-                    const siRaw = sv[7];
+                    const siRaw = mapped.selected_items;
                     if (siRaw && siRaw !== "[]") {
                       for (const f of JSON.parse(siRaw)) { if (f) wfFilenames.add(f); }
                     }
                   } catch(_) {}
                   try {
-                    const ri = sv[8];
+                    const ri = mapped.reference_image;
                     if (ri && ri !== "") wfFilenames.add(ri);
                   } catch(_) {}
 
@@ -9925,6 +9993,28 @@ app.registerExtension({
         }
       } catch(e) {
         console.error("[MIL] widgets_values realignment error:", e);
+      }
+
+      // ── Legacy value migration: old fit_mode labels → keep_proportion ──
+      try {
+        const kpW = node.widgets?.find(w => w.name === "keep_proportion") || node.widgets?.find(w => w.name === "fit_mode");
+        if (kpW) {
+          const legacyMap = {
+            letterbox: "pad",
+            fill: "stretch",
+            keep_proportion: "crop",
+            "keep proportion": "crop",
+            "keep-proportion": "crop",
+          };
+          const migrated = legacyMap[String(kpW.value).trim().toLowerCase()];
+          if (migrated) {
+            console.log(`[MIL] Migrating legacy fit value "${kpW.value}" → "${migrated}"`);
+            kpW.value = migrated;
+            node.setDirtyCanvas?.(true, true);
+          }
+        }
+      } catch(e) {
+        console.error("[MIL] keep_proportion migration error:", e);
       }
 
       // ── Self-healing: validate widget values ──────────────────────────

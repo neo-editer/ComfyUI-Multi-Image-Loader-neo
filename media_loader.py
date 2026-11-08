@@ -378,25 +378,27 @@ class MultiMediaLoader(MultiImageLoader):
 
     @classmethod
     def IS_CHANGED(cls, images=None, aspect_ratio_in=None, image_list="[]",
-                   fit_mode="letterbox", bg_color="gray", aspect_ratio="Starred image",
+                   keep_proportion="pad", bg_color="gray", aspect_ratio="Starred image",
                    megapixels=1, thumb_size="medium", double_click="Edit Image",
                    crop_data="{}", selected_items="[]", reference_image="",
-                   grid_columns=3, grid_rows=3, randomize="None",
-                   custom_path="", video_fps=8.0, video_max_frames=24, gif_max_frames=24):
+                   grid_columns=3, grid_rows=3, randomize="None", crop_position="center",
+                   custom_path="", video_fps=8.0, video_max_frames=24, gif_max_frames=24,
+                   fit_mode=None):
         base = MultiImageLoader.IS_CHANGED(
-            images, aspect_ratio_in, image_list, fit_mode, bg_color, aspect_ratio,
+            images, aspect_ratio_in, image_list, fit_mode or keep_proportion, bg_color, aspect_ratio,
             megapixels, thumb_size, double_click, crop_data, selected_items,
-            reference_image, grid_columns, grid_rows, randomize,
+            reference_image, grid_columns, grid_rows, randomize, crop_position,
         )
         extra = f"{custom_path}|{video_fps}|{video_max_frames}|{gif_max_frames}"
         return hashlib.md5(f"{base}|{extra}".encode()).hexdigest()
 
     def load_images(self, images=None, aspect_ratio_in=None, image_list="[]",
-                    fit_mode="letterbox", bg_color="gray", aspect_ratio="Starred image",
+                    keep_proportion="pad", bg_color="gray", aspect_ratio="Starred image",
                     megapixels=1, thumb_size="medium", double_click="Edit Image",
                     crop_data="{}", selected_items="[]", reference_image="",
-                    grid_columns=3, grid_rows=3, randomize="None",
-                    custom_path="", video_fps=8.0, video_max_frames=24, gif_max_frames=24):
+                    grid_columns=3, grid_rows=3, randomize="None", crop_position="center",
+                    custom_path="", video_fps=8.0, video_max_frames=24, gif_max_frames=24,
+                    fit_mode=None):
         try:
             sources = json.loads(image_list) if image_list else []
             if not isinstance(sources, list):
@@ -461,7 +463,7 @@ class MultiMediaLoader(MultiImageLoader):
             images=images,
             aspect_ratio_in=aspect_ratio_in,
             image_list=json.dumps(expanded),
-            fit_mode=fit_mode,
+            keep_proportion=fit_mode or keep_proportion,
             bg_color=bg_color,
             aspect_ratio=aspect_ratio,
             megapixels=megapixels,
@@ -473,6 +475,7 @@ class MultiMediaLoader(MultiImageLoader):
             grid_columns=grid_columns,
             grid_rows=grid_rows,
             randomize=randomize,
+            crop_position=crop_position,
         )
 
         # Report the folder the media is resolved from: custom_path or the input dir.

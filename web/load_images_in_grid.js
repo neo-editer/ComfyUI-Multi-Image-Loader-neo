@@ -1062,7 +1062,41 @@ function createWidget(node) {
   }
 
   function getFitModeWidget() {
-    return node.widgets?.find((w) => w.name === "fit_mode");
+    // `keep_proportion` is the current widget name; `fit_mode` is the legacy one.
+    return node.widgets?.find((w) => w.name === "keep_proportion")
+        || node.widgets?.find((w) => w.name === "fit_mode");
+  }
+
+  function normalizeFitMode(value) {
+    const v = String(value ?? "pad").trim().toLowerCase().replace(/[-_ ]+/g, "_");
+    const map = {
+      stretch: "stretch",
+      fill: "stretch",
+      resize: "pad",
+      pad: "pad",
+      letterbox: "pad",
+      keep_proportion: "crop",
+      crop: "crop",
+      original: "original",
+    };
+    return map[v] ?? "pad";
+  }
+
+  function getCropPositionWidget() {
+    return node.widgets?.find((w) => w.name === "crop_position");
+  }
+
+  function cropAnchorFactors(value) {
+    const p = String(value ?? "center").trim().toLowerCase().replace(/[-_ ]+/g, "_");
+    if (p === "left") return [0, 0.5];
+    if (p === "right") return [1, 0.5];
+    if (p === "top") return [0.5, 0];
+    if (p === "bottom") return [0.5, 1];
+    return [0.5, 0.5];
+  }
+
+  function getCropAnchor() {
+    return cropAnchorFactors(getCropPositionWidget()?.value ?? "center");
   }
 
   function getBgColorWidget() {
@@ -2014,7 +2048,7 @@ function createWidget(node) {
 
       // Solid-fill crop path — crop region is a PRE-step on the source
       const el = await loadImage(item.src);
-      const mode = getFitModeWidget()?.value ?? "letterbox";
+      const mode = normalizeFitMode(getFitModeWidget()?.value ?? "pad");
       // If pixel edits exist, load the edited image (crop already baked in)
       let drawSrc = el, srcX, srcY, srcW, srcH;
       if (t.imageEditsDataUrl || t.imageEditsFile) {
@@ -2037,12 +2071,24 @@ function createWidget(node) {
       const ctx = cvs.getContext("2d");
       const bgC = /^#[0-9a-fA-F]{6}$/.test(bgRaw) ? bgRaw : getEffectiveBgColor();
       ctx.fillStyle = bgC; ctx.fillRect(0, 0, refW, refH);
+      // ── ASPECT CROP: keep_proportion crops the SOURCE before any scaling ──
+      if (mode === "crop") {
+        const targetAR = refW / refH, srcAR = srcW / srcH;
+        let cw = srcW, ch = srcH;
+        if (srcAR > targetAR) cw = srcH * targetAR;
+        else ch = srcW / targetAR;
+        const [ax, ay] = getCropAnchor();
+        srcX += (srcW - cw) * ax;
+        srcY += (srcH - ch) * ay;
+        srcW = Math.max(1, cw);
+        srcH = Math.max(1, ch);
+      }
       const ox = t.ox ?? 0, oy = t.oy ?? 0, sc = t.scale ?? 1;
       const fH = !!(t.flipH), fV = !!(t.flipV), rot = (t.rotate || 0) * Math.PI / 180;
       const cosA = Math.abs(Math.cos(rot)), sinA = Math.abs(Math.sin(rot));
       const rW = srcW * cosA + srcH * sinA;
       const rH = srcW * sinA + srcH * cosA;
-      // respect fit_mode for base scale
+      // respect keep_proportion for base scale
       const bf = mode === "crop"
         ? Math.max(refW / rW, refH / rH)
         : Math.min(refW / rW, refH / rH);
@@ -2081,23 +2127,28 @@ function createWidget(node) {
       return cvs.toDataURL("image/png");
     }
 
-    // No crop transform — apply letterbox/crop fit vs reference dims
-    const mode = getFitModeWidget()?.value ?? "letterbox";
+    // No crop transform — apply pad/crop fit vs reference dims
+    const mode = normalizeFitMode(getFitModeWidget()?.value ?? "pad");
     const el = await loadImage(item.src);
     const cvs = document.createElement("canvas");
     cvs.width = refW; cvs.height = refH;
     const ctx = cvs.getContext("2d");
 
-    if (mode === "letterbox") {
+    if (mode === "stretch") {
+      ctx.drawImage(el, 0, 0, refW, refH);
+    } else if (mode === "pad") {
       ctx.fillStyle = getEffectiveBgColor();  // node bg_color (no per-image override for non-crop items)
       ctx.fillRect(0, 0, refW, refH);
       const scale = Math.min(refW / el.naturalWidth, refH / el.naturalHeight);
       const dw = el.naturalWidth * scale, dh = el.naturalHeight * scale;
       ctx.drawImage(el, (refW - dw) / 2, (refH - dh) / 2, dw, dh);
-    } else { // crop
-      const scale = Math.max(refW / el.naturalWidth, refH / el.naturalHeight);
-      const sw = refW / scale, sh = refH / scale;
-      const sx = (el.naturalWidth - sw) / 2, sy = (el.naturalHeight - sh) / 2;
+    } else { // crop / keep_proportion — crop the source first, then scale
+      const targetAR = refW / refH, srcAR = el.naturalWidth / el.naturalHeight;
+      let sw = el.naturalWidth, sh = el.naturalHeight;
+      if (srcAR > targetAR) sw = sh * targetAR;
+      else sh = sw / targetAR;
+      const [ax, ay] = getCropAnchor();
+      const sx = (el.naturalWidth - sw) * ax, sy = (el.naturalHeight - sh) * ay;
       ctx.drawImage(el, sx, sy, sw, sh, 0, 0, refW, refH);
     }
     return cvs.toDataURL("image/png");
@@ -2122,7 +2173,7 @@ function createWidget(node) {
   async function renderFitPreviews() {
     if (items.length < 1) return;
 
-    const mode = getFitModeWidget()?.value ?? "letterbox";
+    const mode = normalizeFitMode(getFitModeWidget()?.value ?? "pad");
     const ar = getAspectRatioWidget()?.value ?? "none";
 
     try {
@@ -2141,7 +2192,8 @@ function createWidget(node) {
         const globalScale = 1.0;
         jobs.push(
           workerRender("fitPreview", items[i].src, {
-            targetW, targetH, mode, bgColor, globalScale
+            targetW, targetH, mode, bgColor, globalScale,
+            cropPosition: getCropPositionWidget()?.value ?? "center"
           }).then(dataUrl => { items[i].previewSrc = dataUrl; })
             .catch(e => console.warn(`[MIL] Fit preview failed for ${items[i].filename}:`, e))
         );
@@ -2162,7 +2214,7 @@ function createWidget(node) {
   async function renderCropPreviews() {
     if (items.length < 1) return;
     const { refW, refH } = await computeRefDims();
-    const mode = getFitModeWidget()?.value ?? "letterbox";
+    const mode = normalizeFitMode(getFitModeWidget()?.value ?? "pad");
 
     const jobs = [];
     for (let i = 0; i < items.length; i++) {
@@ -2179,7 +2231,10 @@ function createWidget(node) {
           fetch("/multi_image_loader/preview", {
             method: "POST",
             headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({filename: item.filename, transform: t, refW, refH, globalScale})
+            body: JSON.stringify({
+              filename: item.filename, transform: t, refW, refH, globalScale,
+              fitMode: mode, cropPosition: getCropPositionWidget()?.value ?? "center",
+            })
           }).then(async resp => {
             if (resp.ok) {
               const { dataUrl } = await resp.json();
@@ -3398,9 +3453,9 @@ function createWidget(node) {
 
     secEdit.appendChild(mkSec("Quick Fit", () => {
       dOX=0; dOY=0; edScale=1; syncScaleUI(); updLbl();
-    }, "Reset to Letterbox"));
+    }, "Reset to Fit"));
     secEdit.appendChild(mkPB("\u2B1B Fill  (cover)",  doFill));
-    secEdit.appendChild(mkPB("\u2B1C Fit   (letterbox)", ()=>{ dOX=0;dOY=0;edScale=1; updLbl(); }));
+    secEdit.appendChild(mkPB("\u2B1C Fit   (pad)", ()=>{ dOX=0;dOY=0;edScale=1; updLbl(); }));
     secEdit.appendChild(mkPB("\u2194 Fit Width",  doFitW));
     secEdit.appendChild(mkPB("\u2195 Fit Height", doFitH));
     secEdit.appendChild(mkSec("Flip", () => {
@@ -5203,7 +5258,7 @@ function createWidget(node) {
       return { rW: w*c+h*s, rH: w*s+h*c };
     }
     function _bfitOf(rW, rH) {
-      const fm = getFitModeWidget()?.value ?? "letterbox";
+      const fm = normalizeFitMode(getFitModeWidget()?.value ?? "pad");
       return fm === "crop" ? Math.max(frameW/rW, frameH/rH) : Math.min(frameW/rW, frameH/rH);
     }
     function doFill() {
@@ -5257,7 +5312,9 @@ function createWidget(node) {
         }
       }
 
-      const cacheKey = JSON.stringify(transform) + "|" + fn;
+      const fitMode = normalizeFitMode(getFitModeWidget()?.value ?? "pad");
+      const cropPosition = getCropPositionWidget()?.value ?? "center";
+      const cacheKey = JSON.stringify(transform) + "|" + fn + "|" + fitMode + "|" + cropPosition;
       edReqHandle = setTimeout(async () => {
         if (!edImg || !fn) return;
         const cached = edPreviewCache.get(cacheKey);
@@ -5266,7 +5323,7 @@ function createWidget(node) {
           const resp = await fetch("/multi_image_loader/preview", {
             method: "POST",
             headers: {"Content-Type":"application/json"},
-            body: JSON.stringify({filename: fn, transform, refW:edRefW, refH:edRefH})
+            body: JSON.stringify({filename: fn, transform, refW:edRefW, refH:edRefH, fitMode, cropPosition})
           });
           if (!resp.ok) throw new Error(`${resp.status}: ${await resp.text()}`);
           const { dataUrl } = await resp.json();
@@ -5299,7 +5356,7 @@ function createWidget(node) {
       const eW = effNatW(), eH = effNatH();
       const rf=edRotate*Math.PI/180, c=Math.abs(Math.cos(rf)), s=Math.abs(Math.sin(rf));
       const rW=eW*c+eH*s, rH=eW*s+eH*c;
-      const edFitMode = getFitModeWidget()?.value ?? "letterbox";
+      const edFitMode = normalizeFitMode(getFitModeWidget()?.value ?? "pad");
       bFit = edFitMode === "crop"
         ? Math.max(frameW/rW, frameH/rH)
         : Math.min(frameW/rW, frameH/rH);
@@ -8115,8 +8172,8 @@ app.registerExtension({
             node._milDomWidget?.element?._renderWithResize?.();
           };
         }
-        // Auto-preview when aspect_ratio, fit_mode, megapixels, bg_color, or scale change
-        const autoPreviewWidgets = ["aspect_ratio", "fit_mode", "megapixels", "bg_color", "scale"];
+        // Auto-preview when aspect_ratio, keep_proportion, crop_position, megapixels, bg_color, or scale change
+        const autoPreviewWidgets = ["aspect_ratio", "keep_proportion", "fit_mode", "crop_position", "megapixels", "bg_color", "scale"];
         autoPreviewWidgets.forEach(wName => {
           const w = node.widgets?.find(ww => ww.name === wName);
           if (w) {

@@ -174,9 +174,8 @@ async def preview_transform_handler(request):
         ref_w     = max(32, int(data.get("refW", 512)))
         ref_h     = max(32, int(data.get("refH", 512)))
         global_scale = float(data.get("globalScale", 1.0))
-        fit_mode  = data.get("fitMode", "letterbox")
-        if fit_mode not in ("letterbox", "crop", "original"):
-            fit_mode = "letterbox"
+        fit_mode = _normalize_fit_mode(data.get("fitMode", "pad"))
+        crop_position = str(data.get("cropPosition", data.get("crop_position", "center")))
 
         if not filename:
             return web.Response(status=400, text="Missing filename")
@@ -204,7 +203,7 @@ async def preview_transform_handler(request):
                 p_ref_w, p_ref_h = max(32, int(ref_w * s)), max(32, int(ref_h * s))
             else:
                 p_ref_w, p_ref_h = ref_w, ref_h
-            return _apply_crop_transform(img, transform, p_ref_w, p_ref_h, fit_mode=fit_mode, global_scale=global_scale)
+            return _apply_crop_transform(img, transform, p_ref_w, p_ref_h, fit_mode=fit_mode, global_scale=global_scale, crop_position=crop_position)
 
         result = await loop.run_in_executor(None, _run)
 
@@ -570,7 +569,69 @@ def _parse_bg_color_word(word: str) -> tuple:
     return mapping.get(word.strip().lower(), (128, 128, 128))
 
 
-def _fit_image(img: Image.Image, target_w: int, target_h: int, mode: str, bg_color: tuple = (128, 128, 128), global_scale: float = 1.0) -> Image.Image:
+def _normalize_fit_mode(mode: str) -> str:
+    """Normalize user-facing fit names to internal modes.
+
+    Supported names: stretch, resize, pad, crop, keep_proportion, original.
+    Legacy aliases: fill -> stretch, letterbox -> pad, crop -> crop.
+    """
+    if mode is None:
+        return "pad"
+    v = str(mode).strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "stretch": "stretch",
+        "fill": "stretch",
+        "resize": "pad",
+        "pad": "pad",
+        "letterbox": "pad",
+        "keep_proportion": "crop",
+        "keep_proportion_": "crop",
+        "crop": "crop",
+        "original": "original",
+    }
+    return aliases.get(v, "pad")
+
+
+def _crop_position_factors(position: str) -> tuple:
+    """Return x/y crop alignment factors for center/left/right/top/bottom."""
+    p = (position or "center").strip().lower().replace("-", "_").replace(" ", "_")
+    if p == "left":
+        return 0.0, 0.5
+    if p == "right":
+        return 1.0, 0.5
+    if p == "top":
+        return 0.5, 0.0
+    if p == "bottom":
+        return 0.5, 1.0
+    return 0.5, 0.5
+
+
+def _crop_to_aspect(img: Image.Image, target_w: int, target_h: int, crop_position: str = "center") -> Image.Image:
+    """Crop `img` to the aspect ratio of (target_w, target_h) — WITHOUT resizing.
+
+    This runs BEFORE any scaling so the keep_proportion path throws away the
+    overflow on the original pixels instead of upscaling pixels it would then discard.
+    """
+    src_w, src_h = img.size
+    if src_w <= 0 or src_h <= 0 or target_w <= 0 or target_h <= 0:
+        return img
+    target_ar = target_w / target_h
+    src_ar = src_w / src_h
+    if abs(src_ar - target_ar) <= 1e-6:
+        return img
+    if src_ar > target_ar:  # too wide — trim the sides
+        crop_w = max(1, min(src_w, round(src_h * target_ar)))
+        crop_h = src_h
+    else:                   # too tall — trim top/bottom
+        crop_w = src_w
+        crop_h = max(1, min(src_h, round(src_w / target_ar)))
+    ax, ay = _crop_position_factors(crop_position)
+    left = min(max(0, round((src_w - crop_w) * ax)), src_w - crop_w)
+    top = min(max(0, round((src_h - crop_h) * ay)), src_h - crop_h)
+    return img.crop((left, top, left + crop_w, top + crop_h))
+
+
+def _fit_image(img: Image.Image, target_w: int, target_h: int, mode: str, bg_color: tuple = (128, 128, 128), global_scale: float = 1.0, crop_position: str = "center") -> Image.Image:
     """
     Resize `img` to (target_w, target_h) using the requested fit strategy.
     If global_scale is used, the post-fit resulting canvas is scaled down and centered inside the final bounds.
@@ -581,6 +642,7 @@ def _fit_image(img: Image.Image, target_w: int, target_h: int, mode: str, bg_col
     """
     canvas = Image.new("RGB", (target_w, target_h), bg_color)
     src_w, src_h = img.size
+    mode = _normalize_fit_mode(mode)
 
     if mode == "original":
         paste_x = (target_w - src_w) // 2
@@ -598,8 +660,17 @@ def _fit_image(img: Image.Image, target_w: int, target_h: int, mode: str, bg_col
             return final_canvas
         return canvas
 
-    if mode == "fill":
+    if mode == "stretch":
         resized = img.resize((target_w, target_h), Image.BICUBIC)
+        if resized.mode == "RGBA":
+            canvas.paste(resized, (0, 0), mask=resized.split()[3])
+        else:
+            canvas.paste(resized, (0, 0))
+    elif mode == "crop":
+        # CROP FIRST, then resize: anchor the source to the target aspect ratio
+        # before resampling, so no upscaled pixels are discarded afterwards.
+        cropped = _crop_to_aspect(img, target_w, target_h, crop_position)
+        resized = cropped.resize((target_w, target_h), Image.BICUBIC)
         if resized.mode == "RGBA":
             canvas.paste(resized, (0, 0), mask=resized.split()[3])
         else:
@@ -607,7 +678,7 @@ def _fit_image(img: Image.Image, target_w: int, target_h: int, mode: str, bg_col
     else:
         scale_w = target_w / src_w
         scale_h = target_h / src_h
-        
+
         # If AR is extremely close (e.g. Starred image rounding), force exact fit to avoid 1px gaps
         if abs(scale_w - scale_h) < 0.005:
             resized = img.resize((target_w, target_h), Image.BICUBIC)
@@ -616,27 +687,18 @@ def _fit_image(img: Image.Image, target_w: int, target_h: int, mode: str, bg_col
             else:
                 canvas.paste(resized, (0, 0))
         else:
-            scale = min(scale_w, scale_h) if mode == "letterbox" else max(scale_w, scale_h)
-            
+            scale = min(scale_w, scale_h)
+
             new_w = max(1, round(src_w * scale))
             new_h = max(1, round(src_h * scale))
             resized = img.resize((new_w, new_h), Image.BICUBIC)
-            
-            if mode == "crop" and (new_w > target_w or new_h > target_h):
-                left = (new_w - target_w) // 2
-                top  = (new_h - target_h) // 2
-                cropped = resized.crop((left, top, left + target_w, top + target_h))
-                if cropped.mode == "RGBA":
-                    canvas.paste(cropped, (0, 0), mask=cropped.split()[3])
-                else:
-                    canvas.paste(cropped, (0, 0))
+
+            offset_x = (target_w - new_w) // 2
+            offset_y = (target_h - new_h) // 2
+            if resized.mode == "RGBA":
+                canvas.paste(resized, (offset_x, offset_y), mask=resized.split()[3])
             else:
-                offset_x = (target_w - new_w) // 2
-                offset_y = (target_h - new_h) // 2
-                if resized.mode == "RGBA":
-                    canvas.paste(resized, (offset_x, offset_y), mask=resized.split()[3])
-                else:
-                    canvas.paste(resized, (offset_x, offset_y))
+                canvas.paste(resized, (offset_x, offset_y))
             
     # Apply global_scale strictly upon the resolved canvas
     if global_scale != 1.0:
@@ -669,20 +731,23 @@ def _apply_crop_region(img: Image.Image, transform: dict) -> Image.Image:
     return img.crop((left, top, right, bottom))
 
 
-def _apply_crop_transform(img: Image.Image, transform: dict, canvas_w: int, canvas_h: int, fit_mode: str = "letterbox", node_bg_color: tuple = (128, 128, 128), global_scale: float = 1.0) -> Image.Image:
+def _apply_crop_transform(img: Image.Image, transform: dict, canvas_w: int, canvas_h: int, fit_mode: str = "pad", node_bg_color: tuple = (128, 128, 128), global_scale: float = 1.0, crop_position: str = "center") -> Image.Image:
     """
     Apply a user-defined pan/zoom/flip/rotate transform and crop to canvas_w × canvas_h.
     transform keys:
       ox, oy    – offset of image centre from canvas centre (fraction of canvas dims)
-      scale     – zoom factor relative to letterbox-fit (1.0 = whole image fits)
+      scale     – zoom factor relative to padded-fit (1.0 = whole image fits)
       flipH, flipV – mirror flags
       rotate    – clockwise degrees (-180..180)
       bg        – background fill: 'black' | 'white' | '#rrggbb' | '#808080' (default) |
                   'telea' | 'navier-stokes'
-    fit_mode      – 'letterbox' | 'crop'  controls base scale when scale==1.0
-    node_bg_color – RGB tuple for letterbox padding (from the node's bg_color widget)
+    fit_mode      – 'pad' | 'crop' | 'stretch'  controls base scale when scale==1.0
+    node_bg_color – RGB tuple for padding (from the node's bg_color widget)
     """
     import numpy as np
+
+    fit_mode = _normalize_fit_mode(fit_mode)
+    crop_position = crop_position or "center"
 
     # ── PRE-CROP: apply crop region to source image FIRST ──────────────────────
     img = _apply_crop_region(img, transform)
@@ -718,6 +783,10 @@ def _apply_crop_transform(img: Image.Image, transform: dict, canvas_w: int, canv
             img = Image.alpha_composite(img, edits_pil)
         except Exception as e:
             print(f"[MIL] Warning: failed to composite pixel edits: {e}")
+
+    # ── ASPECT CROP: keep_proportion crops the SOURCE before any resampling ──
+    if fit_mode == "crop":
+        img = _crop_to_aspect(img, canvas_w, canvas_h, crop_position)
 
     ox     = float(transform.get("ox",     0.0))
     oy     = float(transform.get("oy",     0.0))
@@ -780,7 +849,7 @@ def _apply_crop_transform(img: Image.Image, transform: dict, canvas_w: int, canv
         # Scale to fit/fill canvas, applying user zoom
         src_w, src_h = rgba.size
         scale_w, scale_h = canvas_w / src_w, canvas_h / src_h
-        
+
         # Tolerance check for near-perfect fits
         if abs(scale_w - scale_h) < 0.005 and scale == 1.0 and ox == 0 and oy == 0:
             resized = rgba.resize((canvas_w, canvas_h), Image.BICUBIC)
@@ -806,7 +875,7 @@ def _apply_crop_transform(img: Image.Image, transform: dict, canvas_w: int, canv
         inpaint_mask = np.where(alpha_np < 128, 255, 0).astype(np.uint8)
 
         # Incorporate lasso mask — areas outside lasso selection should also be inpainted
-        lasso_mask = _generate_lasso_mask(transform, img.size, canvas_w, canvas_h, fit_mode)
+        lasso_mask = _generate_lasso_mask(transform, img.size, canvas_w, canvas_h, fit_mode, crop_position)
         if lasso_mask is not None:
             lasso_np = np.array(lasso_mask)
             # lasso_np: 255 = inside selection (keep), 0 = outside (inpaint)
@@ -896,7 +965,7 @@ def _apply_crop_transform(img: Image.Image, transform: dict, canvas_w: int, canv
         canvas.paste(resized, (paste_x, paste_y))
 
     # ── LASSO MASK: apply poly-crop cutout in solid-fill path ──────────────
-    lasso_mask = _generate_lasso_mask(transform, img.size, canvas_w, canvas_h, fit_mode)
+    lasso_mask = _generate_lasso_mask(transform, img.size, canvas_w, canvas_h, fit_mode, crop_position)
     if lasso_mask is not None:
         # lasso_mask: 255 = inside selection (keep), 0 = outside (fill with bg)
         bg_layer = Image.new("RGB", (canvas_w, canvas_h), canvas_bg)
@@ -914,10 +983,11 @@ def _apply_crop_transform(img: Image.Image, transform: dict, canvas_w: int, canv
     return canvas
 
 
-def _generate_lasso_mask(transform: dict, source_img_size: tuple, canvas_w: int, canvas_h: int, fit_mode: str = "letterbox") -> Image.Image:
+def _generate_lasso_mask(transform: dict, source_img_size: tuple, canvas_w: int, canvas_h: int, fit_mode: str = "pad", crop_position: str = "center") -> Image.Image:
     """Generate a composite lasso mask from operations and apply geometric transforms.
     Returns an 'L' mode image (canvas_w × canvas_h) — 255 inside, 0 outside.
     Returns None if no lasso ops in transform."""
+    fit_mode = _normalize_fit_mode(fit_mode)
     if transform.get("lassoIsPaint"):
         return None
 
@@ -973,6 +1043,11 @@ def _generate_lasso_mask(transform: dict, source_img_size: tuple, canvas_w: int,
     rotate = float(transform.get("rotate", 0.0))
     if scale <= 0:
         scale = 1.0
+
+    # Mirror the image path: crop to the canvas aspect ratio BEFORE flipping,
+    # rotating and scaling (crop first, then resize).
+    if fit_mode == "crop":
+        mask = _crop_to_aspect(mask, canvas_w, canvas_h, crop_position)
 
     if flipH: mask = ImageOps.mirror(mask)
     if flipV: mask = ImageOps.flip(mask)
@@ -1080,7 +1155,8 @@ class MultiImageLoader:
 
     Outputs a single IMAGE batch tensor  [B, H, W, C].
     All images are conformed to the first image's dimensions using
-    the chosen fit_mode: letterbox, crop, or fill.
+    the keep_proportion strategy: stretch, resize, pad, crop, or original,
+    with crop_position anchoring the crop to center/top/bottom/left/right.
     """
 
     UPLOADED_FILES_KEY = "image_list"
@@ -1096,7 +1172,15 @@ class MultiImageLoader:
                 "aspect_ratio_in": ("STRING", {"forceInput": True}),
                 # JSON list of filenames persisted in the workflow JSON.
                 "image_list":   ("STRING", {"default": "[]"}),
-                "fit_mode":     (["letterbox", "crop", "original"],),
+                # How source images are conformed to the shared canvas:
+                #   stretch – force target size (distorts aspect ratio)
+                #   resize  – scale proportionally to fit inside the canvas
+                #   pad     – resize + pad the remaining area with bg_color
+                #   crop    – resize + crop the overflow (keeps proportion)
+                #   original– keep native pixels, centered on the canvas
+                "keep_proportion": (["stretch", "resize", "pad", "crop", "original"],
+                                    {"default": "pad"}),
+                "crop_position": (["center", "top", "bottom", "left", "right"], {"default": "center"}),
                 "bg_color":     (["gray", "black", "white", "red"],
                                  {"default": "gray"}),
                 "aspect_ratio": (["Starred image", "Image Input", "Aspect Ratio Input", "Individual Ratios", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"],
@@ -1121,7 +1205,8 @@ class MultiImageLoader:
     OUTPUT_NODE = False
 
     @classmethod
-    def IS_CHANGED(cls, images=None, aspect_ratio_in=None, image_list="[]", fit_mode="letterbox", bg_color="gray", aspect_ratio="Starred image", megapixels=1, thumb_size="medium", double_click="Edit Image", crop_data="{}", selected_items="[]", reference_image="", grid_columns=3, grid_rows=3, randomize="None"):
+    def IS_CHANGED(cls, images=None, aspect_ratio_in=None, image_list="[]", keep_proportion="pad", bg_color="gray", aspect_ratio="Starred image", megapixels=1, thumb_size="medium", double_click="Edit Image", crop_data="{}", selected_items="[]", reference_image="", grid_columns=3, grid_rows=3, randomize="None", crop_position="center", fit_mode=None):
+        fit_mode = _normalize_fit_mode(fit_mode or keep_proportion)
         if randomize != "None":
             return float("NaN")
         # Include images shape in the hash so re-execution triggers when it changes
@@ -1129,9 +1214,12 @@ class MultiImageLoader:
         if images is not None:
             master_hash = f"{images.shape}"
         ar_in_hash = aspect_ratio_in or ""
-        return hashlib.md5((image_list + crop_data + selected_items + reference_image + aspect_ratio + ar_in_hash + fit_mode + bg_color + str(megapixels) + str(grid_columns) + str(grid_rows) + master_hash).encode()).hexdigest()
+        return hashlib.md5((image_list + crop_data + selected_items + reference_image + aspect_ratio + ar_in_hash + fit_mode + crop_position + bg_color + str(megapixels) + str(grid_columns) + str(grid_rows) + master_hash).encode()).hexdigest()
 
-    def load_images(self, images=None, aspect_ratio_in=None, image_list="[]", fit_mode="letterbox", bg_color="gray", aspect_ratio="Starred image", megapixels=1, thumb_size="medium", double_click="Edit Image", crop_data="{}", selected_items="[]", reference_image="", grid_columns=3, grid_rows=3, randomize="None"):
+    def load_images(self, images=None, aspect_ratio_in=None, image_list="[]", keep_proportion="pad", bg_color="gray", aspect_ratio="Starred image", megapixels=1, thumb_size="medium", double_click="Edit Image", crop_data="{}", selected_items="[]", reference_image="", grid_columns=3, grid_rows=3, randomize="None", crop_position="center", fit_mode=None):
+        # `fit_mode` is the legacy widget name; keep accepting it for old workflows.
+        fit_mode = _normalize_fit_mode(fit_mode or keep_proportion)
+        crop_position = crop_position or "center"
         # ── Resolve aspect_ratio from upstream input if requested ──────────────
         if aspect_ratio == "Aspect Ratio Input":
             if aspect_ratio_in and isinstance(aspect_ratio_in, str) and ":" in aspect_ratio_in:
@@ -1370,12 +1458,12 @@ class MultiImageLoader:
                     # We do not force a shared canvas here; that would reintroduce the padding
                     # that this mode is supposed to avoid.
                     if t_orig:
-                        img_orig = _apply_crop_transform(img_orig, t_orig, img_orig.width, img_orig.height, fit_mode="letterbox", node_bg_color=_parse_bg_color_word(bg_color), global_scale=1.0)
+                        img_orig = _apply_crop_transform(img_orig, t_orig, img_orig.width, img_orig.height, fit_mode="pad", node_bg_color=_parse_bg_color_word(bg_color), global_scale=1.0, crop_position=crop_position)
                 else:
                     if t_orig:
-                        img_orig = _apply_crop_transform(img_orig, t_orig, orig_ref_w, orig_ref_h, fit_mode=fit_mode, node_bg_color=_parse_bg_color_word(bg_color), global_scale=1.0)
+                        img_orig = _apply_crop_transform(img_orig, t_orig, orig_ref_w, orig_ref_h, fit_mode=fit_mode, node_bg_color=_parse_bg_color_word(bg_color), global_scale=1.0, crop_position=crop_position)
                     elif img_orig.size != (orig_ref_w, orig_ref_h):
-                        img_orig = _fit_image(img_orig, orig_ref_w, orig_ref_h, fit_mode, bg_color=_parse_bg_color_word(bg_color), global_scale=1.0)
+                        img_orig = _fit_image(img_orig, orig_ref_w, orig_ref_h, fit_mode, bg_color=_parse_bg_color_word(bg_color), global_scale=1.0, crop_position=crop_position)
 
                 # Composite over background if still RGBA, otherwise convert to RGB
                 if img_orig.mode == "RGBA":
@@ -1401,9 +1489,9 @@ class MultiImageLoader:
                 _bg_rgb = _parse_bg_color_word(bg_color)
 
                 if t:
-                    img = _apply_crop_transform(img, t, ref_w, ref_h, fit_mode=fit_mode, node_bg_color=_bg_rgb, global_scale=1.0)
+                    img = _apply_crop_transform(img, t, ref_w, ref_h, fit_mode=fit_mode, node_bg_color=_bg_rgb, global_scale=1.0, crop_position=crop_position)
                 elif img.size != (ref_w, ref_h):
-                    img = _fit_image(img, ref_w, ref_h, fit_mode, bg_color=_bg_rgb, global_scale=1.0)
+                    img = _fit_image(img, ref_w, ref_h, fit_mode, bg_color=_bg_rgb, global_scale=1.0, crop_position=crop_position)
 
                 # Composite over background if still RGBA, otherwise convert to RGB
                 if img.mode == "RGBA":
